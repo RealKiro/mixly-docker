@@ -1,0 +1,24 @@
+# Mixly 离线服务端 - 群晖 NAS Docker Compose 部署
+# 用法：将本目录上传到群晖（如 /volume1/docker/mixly），在 Container Manager
+#       中"新增 -> 导入 docker-compose.yml"，或 SSH 执行 docker compose up -d
+services:
+  mixly:
+    image: ghcr.io/YOUR_GH_USERNAME/mixly-server:latest   # 构建推送后改成你的镜像名
+    container_name: mixly-server
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "8080:8080"    # MixIO HTTP（官方默认端口）
+      - "8443:8443"    # MixIO HTTPS 主页面
+      - "1883:1883"    # MQTT
+      - "8083:8083"    # WebSocket MQTT
+      - "8084:8084"    # WSS MQTT
+      - "8082:8082"    # Yjs 协同
+      - "8086:8086"    # Yjs WSS
+      # - "443:443"    # 如日志显示监听 443 且需直连，再放开
+    volumes:
+      - ./data/storage:/opt/mixly_server/mixio/storage   # SQLite 数据库（必须持久化）
+      - ./data/store:/opt/mixly_server/mixio/store       # 项目文件
+      - ./data/logs:/opt/mixly_server/mixio/logs         # 日志
+      - ./data/config:/opt/mixly_server/mixio/config     # config.json 与 HTTPS 证书

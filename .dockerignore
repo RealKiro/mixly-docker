@@ -1,0 +1,7 @@
+# 构建上下文为 官方解压包/mixly_server，以下为相对该目录的忽略项
+mixio/logs/*
+mixio/storage/mixio.db
+mixio/storage/reserve/*
+mixio/store/*
+mixio/pid.info
+**/.DS_Store
