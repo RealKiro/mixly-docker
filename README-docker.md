@@ -6,7 +6,7 @@
 
 - 官方三个压缩包中，只有 `mixly_server`（mixio + mixly + mixco，约 2.7GB）是服务端；`mixly4-linux-x64.zip` 和 `MixAI-linux-x64.zip` 是 NW.js **桌面版**，不适用于服务器部署。
 - `mixio` 是用 Node.js 16.17.0（pkg）打包的**glibc 动态链接 ELF**（x86-64 版 145MB），需要 GLIBC ≥ 2.17、libstdc++、libgcc。官方指令为 `mixio start / stop / install / help`（默认 HTTP 8080，HTTPS 8443，管理模式 18084），见 [gitee.com/mixly2/mixio](https://gitee.com/mixly2/mixio)。它同时是 Web、MQTT(1883)、WebSocket(8083/8084)、Yjs 协同(8082/8086) 服务，并托管 `../mixly`（编辑器）与 `../mixco`（课程）静态资源。
-- **多架构支持**：官方按机型提供 **x64 / arm64 / loong64** 运行包（各架构包内启动文件同名 `mixio`），按机器架构下载放入映射路径即可，容器不做架构转换。镜像构建 amd64+arm64+loong64 三架构 manifest（Alpine 3.21 起 loongarch64 为官方移植架构，gcompat/tini/su-exec 均有 loong64 包）；入口脚本启动时会解析运行包 ELF 头校验架构匹配，防止下错压缩包。
+- **多架构支持**：官方按机型提供 **x64 / arm64 / loong64** 运行包（各架构包内启动文件同名 `mixio`），按机器架构下载放入映射路径即可，容器不做架构转换。镜像构建 amd64+arm64+loong64 三架构 manifest（入口脚本启动时解析运行包 ELF 头校验架构匹配，防止下错压缩包）。注意 Docker Hub 官方 alpine 镜像**没有 loong64 变体**：amd64/arm64 基于官方 `alpine:3` 滚动标签，loong64 腿基于社区移植镜像 `ghcr.io/loong64/alpine:3`（同样滚动追踪最新 3.x，含 loong64），按架构分别构建后合并 manifest。
 - 数据落盘：SQLite 在 `mixio/storage/`，项目文件在 `mixio/store/`，日志在 `mixio/logs/`，配置/证书在 `mixio/config/`。**官方迁移方式是复制 `storage/reserve` 文件夹**——由于运行包整体挂载在宿主机目录，升级镜像天然不丢数据。
 
 ### 为什么 Alpine 还能跑 glibc 程序

@@ -8,12 +8,17 @@
 #       启动时会校验运行包架构与机器是否匹配（见 docker-entrypoint.sh）。
 #       基础镜像用 alpine:3 滚动标签：始终指向最新 3.x 稳定版
 #       （loongarch64 自 Alpine 3.21 起为官方移植架构，3.x 均覆盖）。
+#       注意：Docker Hub 官方 alpine 镜像不含 loong64 变体，loong64 构建需
+#       通过 BASE_IMAGE 指定社区移植镜像（如 ghcr.io/loong64/alpine:3），
+#       由 CI/脚本按架构分别构建后用 manifest 合并。
 #       若某次升级后 gcompat 兼容性异常，可临时固定为具体版本（如 alpine:3.22）。
 #
 # 首次使用：将官方 mixly_server 压缩包解压后放到映射路径，
 #           容器启动时若未检测到运行包会打印放置指引并退出。
 
-FROM alpine:3
+ARG BASE_IMAGE=alpine:3
+
+FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.title="mixly-server-runtime" \
       org.opencontainers.image.description="Mixly 4 离线服务端运行环境（官方运行包需挂载提供）" \
