@@ -18,10 +18,11 @@ Alpine 基础镜像仅 ~8MB，加 `gcompat`（glibc→musl 兼容层）+ `libstd
 | 文件 | 用途 |
 |---|---|
 | `Dockerfile` | Alpine（`alpine:3` 滚动标签，始终最新 3.x 稳定版）+ gcompat + su-exec + tini 的运行环境镜像（约 15MB，amd64+arm64+loong64 三架构） |
-| `docker-entrypoint.sh` | 启动前检测运行包、提示放置路径、修正执行权限、以非 root 运行 |
+| `docker-entrypoint.sh` | 启动前检测运行包、校验架构匹配、提示放置路径、修正执行权限、以非 root 运行 |
 | `docker-compose.yml` | 群晖 Container Manager 可直接导入，含端口与挂载 |
 | `build-push.sh` | 本地 buildx 构建并同时推送 GHCR + Docker Hub |
-| `.github/workflows/docker-publish.yml` | 可选 CI 自动构建（轻镜像可直接进仓库，无大文件问题） |
+| `.github/workflows/ci.yml` | CI 流水线：PR/推 main 跑测试与跨架构构建检查；v* 标签或手动触发时测试通过后推送 GHCR + Docker Hub |
+| `test/smoke-test.sh` | 冒烟测试：无需官方运行包，用假运行包 + ELF 桩验证缺包指引/架构校验/非 root 启动链路/镜像元数据 |
 
 ## 首次运行（三步）
 

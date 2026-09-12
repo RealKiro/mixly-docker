@@ -1,5 +1,7 @@
 # mixly-docker
 
+[![docker-ci](https://github.com/RealKiro/mixly-docker/actions/workflows/ci.yml/badge.svg)](https://github.com/RealKiro/mixly-docker/actions/workflows/ci.yml)
+
 适配 [Mixly 米思齐](https://mixly.cn) 离线服务端（mixly_server）的 Docker 运行环境，支持群晖 NAS 等 **x64 / arm64 / loong64** 设备。
 
 **镜像只含运行环境（约 15MB，Alpine + gcompat），不含官方运行包。** 使用者自行从官方百度网盘下载 `mixly_server` 压缩包，解压后放入挂载目录，首次启动时容器会自动检测并给出放置指引。
@@ -21,7 +23,7 @@
 ### 3️⃣ 在 Fork 仓库中启用并运行构建
 
 1. 进入你 Fork 的仓库 → **Actions** 标签页 → 按提示点击 **I understand my workflows, go ahead and enable them** 启用工作流。
-2. 左侧选择 **docker-publish** → **Run workflow** → 运行。
+2. 左侧选择 **docker-ci** → **Run workflow** → 运行。
    （也可以打一个 `v1.0` 标签推送来触发：`git tag v1.0 && git push origin v1.0`）
 3. 构建几分钟完成（含 QEMU 模拟构建 arm64/loong64），成功后镜像为多架构 manifest，自动覆盖：
 
