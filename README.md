@@ -68,7 +68,7 @@ docker login ghcr.io
 GHCR_USER=你的GitHub用户名 ./build-push.sh v1.0
 ```
 
-构建 `linux/amd64` + `linux/arm64` 双架构 manifest，`docker pull` 时按设备架构自动选择。
+构建 `linux/amd64` + `linux/arm64` + `linux/loong64` 三架构 manifest，`docker pull` 时按设备架构自动选择。
 
 ## 架构与兼容性说明
 
