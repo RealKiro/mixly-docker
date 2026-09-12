@@ -6,7 +6,7 @@
 
 - 官方三个压缩包中，只有 `mixly_server`（mixio + mixly + mixco，约 2.7GB）是服务端；`mixly4-linux-x64.zip` 和 `MixAI-linux-x64.zip` 是 NW.js **桌面版**，不适用于服务器部署。
 - `mixio` 是用 Node.js 16.17.0（pkg）打包的**glibc 动态链接 ELF**（x86-64 版 145MB），需要 GLIBC ≥ 2.17、libstdc++、libgcc。官方指令为 `mixio start / stop / install / help`（默认 HTTP 8080，HTTPS 8443，管理模式 18084），见 [gitee.com/mixly2/mixio](https://gitee.com/mixly2/mixio)。它同时是 Web、MQTT(1883)、WebSocket(8083/8084)、Yjs 协同(8082/8086) 服务，并托管 `../mixly`（编辑器）与 `../mixco`（课程）静态资源。
-- **多架构支持**：官方运行包只内置 x86-64 二进制；arm64 内核官方另行发布在 [bnu_mixly/mixio-linux-arm64-dist](https://gitee.com/bnu_mixly/mixio-linux-arm64-dist)（aarch64 glibc ELF，约 143MB）。镜像做成 amd64+arm64 双架构 manifest，ARM 设备上由入口脚本在首次启动时下载该内核并缓存为 `mixio/mixio.arm64`；`mixly/`、`mixco/` 静态资源与架构无关，两种架构共用。注意官方最新 v1.10.5 无 arm64 构建，arm64 内核为 1.10.x 旧版。
+- **多架构支持**：官方按机型提供 **x64 / arm64 / loong64** 运行包（各架构包内启动文件同名 `mixio`），按机器架构下载放入映射路径即可，容器不做架构转换。镜像做成 amd64+arm64 双架构 manifest；loong64 等其他架构在对应机器上用本仓库 Dockerfile 自行构建。
 - 数据落盘：SQLite 在 `mixio/storage/`，项目文件在 `mixio/store/`，日志在 `mixio/logs/`，配置/证书在 `mixio/config/`。**官方迁移方式是复制 `storage/reserve` 文件夹**——由于运行包整体挂载在宿主机目录，升级镜像天然不丢数据。
 
 ### 为什么 Alpine 还能跑 glibc 程序
@@ -18,7 +18,7 @@ Alpine 基础镜像仅 ~8MB，加 `gcompat`（glibc→musl 兼容层）+ `libstd
 | 文件 | 用途 |
 |---|---|
 | `Dockerfile` | Alpine 3.20 + gcompat + su-exec + tini 的运行环境镜像（约 15MB，amd64+arm64 双架构） |
-| `docker-entrypoint.sh` | 启动前检测运行包、按架构选择内核（arm64 首启自动下载）、提示放置路径、修正执行权限、以非 root 运行 |
+| `docker-entrypoint.sh` | 启动前检测运行包、提示放置路径、修正执行权限、以非 root 运行 |
 | `docker-compose.yml` | 群晖 Container Manager 可直接导入，含端口与挂载 |
 | `build-push.sh` | 本地 buildx 构建并同时推送 GHCR + Docker Hub |
 | `.github/workflows/docker-publish.yml` | 可选 CI 自动构建（轻镜像可直接进仓库，无大文件问题） |
@@ -49,11 +49,11 @@ GHCR_USER=RealKiro DOCKERHUB_USER=你的DockerHub用户名 ./build-push.sh v1.0
 
 镜像约 15MB，构建几秒完成，输出 `linux/amd64` + `linux/arm64` 双架构 manifest，ARM 群晖（DS223j 等）同样可拉取。
 
-## ARM64 补充说明
+## 架构说明
 
-- ARM 设备**首次启动**需要联网一次：入口脚本从 [官方发行仓库](https://gitee.com/bnu_mixly/mixio-linux-arm64-dist) 下载 arm64 内核（约 143MB）到挂载目录的 `mixio/mixio.arm64`，之后离线可用；升级运行包或镜像无需重新下载。
-- 离线环境可先在别的设备下载内核，手动放到 `<映射路径>/mixio/mixio.arm64`，入口脚本检测到该文件会直接使用。
-- 官方最新 v1.10.5 未发布 arm64 构建，arm64 内核为 1.10.x 时期旧版；`mixly`/`mixco` 静态资源仍是运行包里的新版，混用如遇异常可关注官方后续 arm64 发行。
+- 官方按机型提供 **x64 / arm64 / loong64** 运行包，各架构包内启动文件同名 `mixio`；不清楚自己机型的架构可咨询主机厂家。
+- x64 / arm64 设备直接拉取多架构镜像，放入对应架构的运行包即可运行。
+- loong64 等其他架构：镜像 manifest 不包含该架构，在对应机器上用本仓库 Dockerfile 自行构建（`docker build -t mixly-server .`），compose 中把 `image:` 改为本地镜像名。
 
 ## 构建后验证（gcompat 兼容性）
 

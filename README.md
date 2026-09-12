@@ -39,16 +39,15 @@
 
 ### 5️⃣ 放置官方运行包并启动
 
-1. 从官方百度网盘下载 `mixly_server` 压缩包（网盘地址请向 mixly.cn 官方/更新群获取）。
-2. 在群晖 File Station 建目录 `/docker/mixly/mixly_server`，解压后把 **`mixio/`、`mixly/`、`mixco/` 三个文件夹**放进该目录。
+1. **按你的机器架构**从官方百度网盘下载对应的 `mixly_server` 压缩包（x64 / arm64 / loong64，不清楚可咨询主机厂家），解压后把 **`mixio/`、`mixly/`、`mixco/` 三个文件夹**放进该目录。
    放好后应存在 `/docker/mixly/mixly_server/mixio/mixio`。
-3. 下载本仓库的 [docker-compose.yml](docker-compose.yml) 放到 `/docker/mixly/`，把 `image:` 改为你自己的镜像：
+2. 下载本仓库的 [docker-compose.yml](docker-compose.yml) 放到 `/docker/mixly/`，把 `image:` 改为你自己的镜像：
 
    ```yaml
    image: ghcr.io/<你的GitHub用户名>/mixly-server:latest
    ```
 
-4. Container Manager → 项目 → 新增 → 选择该 compose 文件 → 启动。
+3. Container Manager → 项目 → 新增 → 选择该 compose 文件 → 启动。
 
 ### 6️⃣ 访问
 
@@ -73,10 +72,13 @@ GHCR_USER=你的GitHub用户名 ./build-push.sh v1.0
 
 ## 架构与兼容性说明
 
-| 设备 | 内核来源 | 说明 |
+官方为不同机型提供对应的 `mixly_server` 压缩包（**x64 / arm64 / loong64**，各架构包内启动文件同名 `mixio`），不清楚自己机型架构可咨询主机厂家。容器只提供运行环境，不做架构转换：
+
+| 机器架构 | 运行包来源 | 镜像 |
 |---|---|---|
-| x86_64（Intel/AMD 群晖、PC） | 运行包自带的 `mixio` 二进制 | 与官方包完全一致 |
-| arm64（ARM 群晖等） | 首次启动由入口脚本从 [官方 Gitee 发行仓库](https://gitee.com/bnu_mixly/mixio-linux-arm64-dist) 下载 arm64 内核，缓存为 `mixio/mixio.arm64`（约 143MB，仅联网一次，之后离线可用） | 官方最新版暂无 arm64 构建，内核为 1.10.x 时期旧版，与新版 WEB 资源混用可能有细微差异 |
+| x64（Intel/AMD 群晖、PC） | 官方网盘 x64 包 | 多架构 manifest 直接 `docker pull` |
+| arm64（ARM 群晖等） | 官方网盘 arm64 包 | 多架构 manifest 直接 `docker pull` |
+| loong64 等 | 官方网盘对应架构包 | 在本机用本仓库 Dockerfile 自行构建（`docker build -t mixly-server .`），compose 里把 `image:` 改成本地镜像名 |
 
 容器内通过 **gcompat** 兼容层运行 glibc 二进制。若个别环境报 `Illegal instruction` 或符号缺失，把 Dockerfile 基础镜像换成 `debian:bookworm-slim` 即可（详见 README-docker.md）。
 

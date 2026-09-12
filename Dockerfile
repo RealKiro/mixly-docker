@@ -3,10 +3,10 @@
 # Mixly 离线服务端 运行环境镜像（不含官方运行包，多架构：amd64 + arm64）
 # 说明：官方 mixio 为 glibc 动态链接 ELF（Node.js/pkg 打包），
 #       Alpine(musl) 需借助 gcompat 兼容层运行，并补充 libstdc++/libgcc。
-#       x86_64 直接使用运行包自带二进制；ARM64 由入口脚本从官方
-#       Gitee 发行仓库下载 arm64 内核（缓存到挂载目录）。
+#       官方按机型提供 x64 / arm64 / loong64 运行包（启动文件同名 mixio），
+#       使用者按机器架构下载对应压缩包放入映射路径即可，容器不做架构转换。
 #
-# 首次使用：将官方 mixly_server 压缩包（百度网盘下载）解压后放到映射路径，
+# 首次使用：将官方 mixly_server 压缩包解压后放到映射路径，
 #           容器启动时若未检测到运行包会打印放置指引并退出。
 
 FROM alpine:3.20
@@ -15,9 +15,8 @@ LABEL org.opencontainers.image.title="mixly-server-runtime" \
       org.opencontainers.image.description="Mixly 4 离线服务端运行环境（官方运行包需挂载提供）" \
       org.opencontainers.image.source="https://mixly.cn"
 
-# gcompat 提供 glibc->musl 兼容层；curl 供 arm64 首启下载内核；
-# su-exec 以非 root 运行 mixio；tini 作 PID 1 转发信号
-RUN apk add --no-cache gcompat libstdc++ libgcc tzdata tini su-exec curl ca-certificates \
+# gcompat 提供 glibc->musl 兼容层；su-exec 以非 root 运行 mixio；tini 作 PID 1 转发信号
+RUN apk add --no-cache gcompat libstdc++ libgcc tzdata tini su-exec \
     && addgroup -S mixly \
     && adduser -S -G mixly -h /opt/mixly_server mixly
 
