@@ -1,7 +1,8 @@
-# 构建上下文为 官方解压包/mixly_server，以下为相对该目录的忽略项
-mixio/logs/*
-mixio/storage/mixio.db
-mixio/storage/reserve/*
-mixio/store/*
-mixio/pid.info
-**/.DS_Store
+# 构建上下文为仓库根目录，忽略本机文件，镜像不含官方运行包
+官方压缩包/
+官方解压包/
+mixly-docker/
+.tmp-docx/
+*.docx
+*.zip
+.git/

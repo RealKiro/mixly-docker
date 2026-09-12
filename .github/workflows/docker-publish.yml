@@ -1,6 +1,5 @@
-# 可选：GitHub Actions 自动构建推送（需将 mixly_server 提交进仓库，
-# 或改为在 CI 中从官方渠道下载解压；单个文件最大 100MB，mixio 二进制 145MB
-# 需用 Git LFS 或 CI 下载方式，故推荐使用本地 build-push.sh 推送）
+# 可选：GitHub Actions 自动构建推送
+# 轻镜像不含官方运行包，仓库无大文件，CI 可直接构建
 name: docker-publish
 
 on:
@@ -36,7 +35,7 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: ./官方解压包/mixly_server
+          context: .
           file: ./Dockerfile
           platforms: linux/amd64
           push: true

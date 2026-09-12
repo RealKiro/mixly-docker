@@ -1,39 +1,33 @@
 # syntax=docker/dockerfile:1
 #
-# Mixly 离线服务端（mixly_server）Docker 镜像
+# Mixly 离线服务端 运行环境镜像（不含官方运行包）
 # 说明：官方 mixio 为 glibc 动态链接的 x86-64 ELF（Node.js/pkg 打包），
 #       Alpine(musl) 需借助 gcompat 兼容层运行，并补充 libstdc++/libgcc。
 #       仅支持 linux/amd64（官方二进制无 arm64 版本）。
+#
+# 首次使用：将官方 mixly_server 压缩包（百度网盘下载）解压后放到映射路径，
+#           容器启动时若未检测到运行包会打印放置指引并退出。
 
 FROM alpine:3.20
 
-ARG TARGETPLATFORM
-LABEL org.opencontainers.image.title="mixly-server" \
-      org.opencontainers.image.description="Mixly 4 离线服务端 (mixio + mixly + mixco)" \
+LABEL org.opencontainers.image.title="mixly-server-runtime" \
+      org.opencontainers.image.description="Mixly 4 离线服务端运行环境（官方运行包需挂载提供）" \
       org.opencontainers.image.source="https://mixly.cn"
 
-# gcompat 提供 glibc->musl 兼容层；tzdata 供时区设置；tini 作 PID 1 转发信号
-RUN apk add --no-cache gcompat libstdc++ libgcc tzdata tini \
+# gcompat 提供 glibc->musl 兼容层；su-exec 以非 root 运行 mixio；tini 作 PID 1 转发信号
+RUN apk add --no-cache gcompat libstdc++ libgcc tzdata tini su-exec \
     && addgroup -S mixly \
     && adduser -S -G mixly -h /opt/mixly_server mixly
 
-# 复制服务端（构建上下文 = 官方解压包/mixly_server）
-COPY --chown=mixly:mixly . /opt/mixly_server
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# 运行时可写目录（推荐用 volume 挂载持久化）
-RUN mkdir -p /opt/mixly_server/mixio/storage \
-             /opt/mixly_server/mixio/store \
-             /opt/mixly_server/mixio/logs \
-    && chown -R mixly:mixly /opt/mixly_server/mixio
-
-USER mixly
-WORKDIR /opt/mixly_server/mixio
+# 官方运行包挂载点：需包含 mixio/ mixly/ mixco/ 三个目录
+VOLUME /opt/mixly_server
 
 ENV TZ=Asia/Shanghai
 
-EXPOSE 8080 443 8443 1883 8082 8083 8084 8086
+# 8080 HTTP | 8443 HTTPS | 18084 管理模式 | 1883 MQTT | 8083/8084 WS(MQTT) | 8082/8086 Yjs
+EXPOSE 8080 443 8443 18084 1883 8082 8083 8084 8086
 
-# mixio 从当前目录读取 config/config.json，并托管 ../mixly 与 ../mixco
-# 官方指令：mixio start / stop / help（见 https://gitee.com/mixly2/mixio）
-ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["./mixio", "start"]
+ENTRYPOINT ["/sbin/tini", "--", "docker-entrypoint.sh"]
