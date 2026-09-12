@@ -8,7 +8,7 @@
 #   3. Container Manager 导入本文件并启动；之后浏览器访问 http://NAS_IP:8080
 services:
   mixly:
-    image: ghcr.io/RealKiro/mixly-server:latest   # 构建推送后按需调整
+    image: ghcr.io/RealKiro/mixly-server:latest   # 多架构镜像，按 NAS 架构自动选择
     container_name: mixly-server
     restart: unless-stopped
     environment:

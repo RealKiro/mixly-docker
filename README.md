@@ -1,6 +1,6 @@
 # mixly-docker
 
-适配 [Mixly 米思齐](https://mixly.cn) 离线服务端（mixly_server）的 Docker 运行环境，面向群晖 NAS 等 amd64 设备。
+适配 [Mixly 米思齐](https://mixly.cn) 离线服务端（mixly_server）的 Docker 运行环境，支持群晖 NAS 等 **amd64 / arm64** 设备。
 
 **镜像只含运行环境（约 15MB，Alpine + gcompat），不含官方运行包。** 使用者自行从官方百度网盘下载 `mixly_server` 压缩包，解压后放入挂载目录，首次启动时容器会自动检测并给出放置指引。
 
@@ -23,10 +23,10 @@
 1. 进入你 Fork 的仓库 → **Actions** 标签页 → 按提示点击 **I understand my workflows, go ahead and enable them** 启用工作流。
 2. 左侧选择 **docker-publish** → **Run workflow** → 运行。
    （也可以打一个 `v1.0` 标签推送来触发：`git tag v1.0 && git push origin v1.0`）
-3. 构建约 1 分钟，成功后镜像位于：
+3. 构建几分钟完成（含 arm64），成功后镜像为多架构 manifest，自动覆盖：
 
    ```
-   ghcr.io/<你的GitHub用户名>/mixly-server:latest
+   ghcr.io/<你的GitHub用户名>/mixly-server:latest   # linux/amd64 + linux/arm64
    ```
 
    GHCR 登录使用 Actions 自带的 `GITHUB_TOKEN`，**无需配置任何 Secrets**。
@@ -69,11 +69,16 @@ docker login ghcr.io
 GHCR_USER=你的GitHub用户名 ./build-push.sh v1.0
 ```
 
-仅支持 `linux/amd64`（官方二进制无 arm64 版本）；ARM 架构群晖（DS223j 等）不可用。
+构建 `linux/amd64` + `linux/arm64` 双架构 manifest，`docker pull` 时按设备架构自动选择。
 
-## 兼容性说明
+## 架构与兼容性说明
 
-官方 `mixio` 是 glibc 动态链接的 x86-64 二进制（Node.js 16/pkg 打包），Alpine 上通过 **gcompat** 兼容层运行。若个别环境报 `Illegal instruction` 或符号缺失，把 Dockerfile 基础镜像换成 `debian:bookworm-slim` 即可（详见 README-docker.md）。
+| 设备 | 内核来源 | 说明 |
+|---|---|---|
+| x86_64（Intel/AMD 群晖、PC） | 运行包自带的 `mixio` 二进制 | 与官方包完全一致 |
+| arm64（ARM 群晖等） | 首次启动由入口脚本从 [官方 Gitee 发行仓库](https://gitee.com/bnu_mixly/mixio-linux-arm64-dist) 下载 arm64 内核，缓存为 `mixio/mixio.arm64`（约 143MB，仅联网一次，之后离线可用） | 官方最新版暂无 arm64 构建，内核为 1.10.x 时期旧版，与新版 WEB 资源混用可能有细微差异 |
+
+容器内通过 **gcompat** 兼容层运行 glibc 二进制。若个别环境报 `Illegal instruction` 或符号缺失，把 Dockerfile 基础镜像换成 `debian:bookworm-slim` 即可（详见 README-docker.md）。
 
 ## 致谢与声明
 
