@@ -23,11 +23,13 @@ missing_package() {
         群晖:    /docker/mixly/mixly_server/    （对应 compose 中的 ./mixly_server）
         命令行:  docker run 时 -v /你的路径/mixly_server:/opt/mixly_server
 
-      放置后应存在:
+      放置后应存在（必需）:
         <映射路径>/mixio/mixio   （启动文件）
         <映射路径>/mixio/config  （配置与证书）
         <映射路径>/mixly/        （编辑器静态资源）
+      可选（因下载版本而异）:
         <映射路径>/mixco/        （课程静态资源）
+        <映射路径>/mixai/        （MixAI 静态资源）
    4. 重新启动容器（docker restart / Container Manager 里重启）
 
  检测通过后本提示不再出现。
@@ -47,7 +49,8 @@ elf_arch() {
     esac
 }
 
-if [ ! -d "$MIXIO_DIR" ] || [ ! -d "$SERVER_DIR/mixly" ] || [ ! -d "$SERVER_DIR/mixco" ] || [ ! -f "$BIN" ]; then
+# 包结构检测：mixio/ 与 mixly/ 必需；mixco/、mixai/ 因版本而异，不强制
+if [ ! -d "$MIXIO_DIR" ] || [ ! -d "$SERVER_DIR/mixly" ] || [ ! -f "$BIN" ]; then
     missing_package
     exit 1
 fi

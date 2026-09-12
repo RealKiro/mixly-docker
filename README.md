@@ -41,7 +41,7 @@
 
 ### 5️⃣ 放置官方运行包并启动
 
-1. **按你的机器架构**从官方百度网盘下载对应的 `mixly_server` 压缩包（x64 / arm64 / loong64，不清楚可咨询主机厂家），解压后把 **`mixio/`、`mixly/`、`mixco/` 三个文件夹**放进该目录。
+1. **按你的机器架构**从官方百度网盘下载对应的 `mixly_server` 压缩包（x64 / arm64 / loong64，不清楚可咨询主机厂家），解压后把**包内全部内容**放进该目录。`mixio/`（服务端）与 `mixly/`（编辑器）为必需，`mixco/`（课程）、`mixai/`（MixAI）因下载版本而异、不作强制。
    放好后应存在 `/docker/mixly/mixly_server/mixio/mixio`。
 2. 下载本仓库的 [docker-compose.yml](docker-compose.yml) 放到 `/docker/mixly/`，把 `image:` 改为你自己的镜像：
 
@@ -61,7 +61,7 @@
 | WebSocket MQTT | `NAS_IP:8083 / 8084` | 明文 / 加密 |
 | Yjs 协同 | `NAS_IP:8082 / 8086` | 明文 / 加密 |
 
-管理员默认 `admin/public`，**上线后务必在 `mixio/config/config.json` 中修改 `ADMIN_PASSWORD`**。若容器反复重启并提示"未检测到运行包"，说明路径多套了一层 `mixly_server`，把文件夹**里面的内容**放到映射目录即可。
+管理员默认 `admin/public`，**上线后务必在 `mixio/config/config.json` 中修改 `ADMIN_PASSWORD`**。两个常见现象：① 首次访问 `https://` 会出现"你的连接不是专用连接"警告——运行包使用自签证书，点"高级 → 继续访问"即可；② `http://8080` 能否访问取决于运行包 `config.json` 的 `MIXIO_HTTP_PORT`（为 0 表示禁用 HTTP，此时只能走 HTTPS 8443）。若容器反复重启并提示"未检测到运行包"，说明路径多套了一层 `mixly_server`，把文件夹**里面的内容**放到映射目录即可。
 
 ## 本地构建（不用 GitHub Actions）
 
@@ -80,7 +80,7 @@ GHCR_USER=你的GitHub用户名 ./build-push.sh v1.0
 |---|---|---|
 | x64（Intel/AMD 群晖、PC） | 官方网盘 x64 包 | 多架构 manifest 直接 `docker pull` |
 | arm64（ARM 群晖等） | 官方网盘 arm64 包 | 多架构 manifest 直接 `docker pull` |
-| loong64（龙芯等） | 官方网盘 loong64 包 | 多架构 manifest 直接 `docker pull` |
+| loong64（龙芯等） | 官方网盘 loong64 包 | 多架构 manifest 直接 `docker pull`（注意：官方文档标注服务端 loongarch64 仅支持虚拟机方式运行，若网盘无原生 loong64 服务端包则该架构无法部署） |
 
 容器启动时入口脚本会解析运行包启动文件的 ELF 头，**自动校验架构与机器是否匹配**：下错压缩包会明确提示该去下载哪个架构，而不是报出难懂的加载器错误。
 
