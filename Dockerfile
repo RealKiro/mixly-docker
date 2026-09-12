@@ -1,15 +1,19 @@
 # syntax=docker/dockerfile:1
 #
-# Mixly 离线服务端 运行环境镜像（不含官方运行包，多架构：amd64 + arm64）
+# Mixly 离线服务端 运行环境镜像（不含官方运行包，三架构：amd64 + arm64 + loong64）
 # 说明：官方 mixio 为 glibc 动态链接 ELF（Node.js/pkg 打包），
 #       Alpine(musl) 需借助 gcompat 兼容层运行，并补充 libstdc++/libgcc。
 #       官方按机型提供 x64 / arm64 / loong64 运行包（启动文件同名 mixio），
-#       使用者按机器架构下载对应压缩包放入映射路径即可，容器不做架构转换。
+#       使用者按机器架构下载对应压缩包放入映射路径即可，容器不做架构转换，
+#       启动时会校验运行包架构与机器是否匹配（见 docker-entrypoint.sh）。
+#       基础镜像用 alpine:3 滚动标签：始终指向最新 3.x 稳定版
+#       （loongarch64 自 Alpine 3.21 起为官方移植架构，3.x 均覆盖）。
+#       若某次升级后 gcompat 兼容性异常，可临时固定为具体版本（如 alpine:3.22）。
 #
 # 首次使用：将官方 mixly_server 压缩包解压后放到映射路径，
 #           容器启动时若未检测到运行包会打印放置指引并退出。
 
-FROM alpine:3.20
+FROM alpine:3
 
 LABEL org.opencontainers.image.title="mixly-server-runtime" \
       org.opencontainers.image.description="Mixly 4 离线服务端运行环境（官方运行包需挂载提供）" \

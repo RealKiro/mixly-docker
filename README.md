@@ -1,6 +1,6 @@
 # mixly-docker
 
-适配 [Mixly 米思齐](https://mixly.cn) 离线服务端（mixly_server）的 Docker 运行环境，支持群晖 NAS 等 **amd64 / arm64** 设备。
+适配 [Mixly 米思齐](https://mixly.cn) 离线服务端（mixly_server）的 Docker 运行环境，支持群晖 NAS 等 **x64 / arm64 / loong64** 设备。
 
 **镜像只含运行环境（约 15MB，Alpine + gcompat），不含官方运行包。** 使用者自行从官方百度网盘下载 `mixly_server` 压缩包，解压后放入挂载目录，首次启动时容器会自动检测并给出放置指引。
 
@@ -23,10 +23,10 @@
 1. 进入你 Fork 的仓库 → **Actions** 标签页 → 按提示点击 **I understand my workflows, go ahead and enable them** 启用工作流。
 2. 左侧选择 **docker-publish** → **Run workflow** → 运行。
    （也可以打一个 `v1.0` 标签推送来触发：`git tag v1.0 && git push origin v1.0`）
-3. 构建几分钟完成（含 arm64），成功后镜像为多架构 manifest，自动覆盖：
+3. 构建几分钟完成（含 QEMU 模拟构建 arm64/loong64），成功后镜像为多架构 manifest，自动覆盖：
 
    ```
-   ghcr.io/<你的GitHub用户名>/mixly-server:latest   # linux/amd64 + linux/arm64
+   ghcr.io/<你的GitHub用户名>/mixly-server:latest   # linux/amd64 + linux/arm64 + linux/loong64
    ```
 
    GHCR 登录使用 Actions 自带的 `GITHUB_TOKEN`，**无需配置任何 Secrets**。
@@ -78,7 +78,9 @@ GHCR_USER=你的GitHub用户名 ./build-push.sh v1.0
 |---|---|---|
 | x64（Intel/AMD 群晖、PC） | 官方网盘 x64 包 | 多架构 manifest 直接 `docker pull` |
 | arm64（ARM 群晖等） | 官方网盘 arm64 包 | 多架构 manifest 直接 `docker pull` |
-| loong64 等 | 官方网盘对应架构包 | 在本机用本仓库 Dockerfile 自行构建（`docker build -t mixly-server .`），compose 里把 `image:` 改成本地镜像名 |
+| loong64（龙芯等） | 官方网盘 loong64 包 | 多架构 manifest 直接 `docker pull` |
+
+容器启动时入口脚本会解析运行包启动文件的 ELF 头，**自动校验架构与机器是否匹配**：下错压缩包会明确提示该去下载哪个架构，而不是报出难懂的加载器错误。
 
 容器内通过 **gcompat** 兼容层运行 glibc 二进制。若个别环境报 `Illegal instruction` 或符号缺失，把 Dockerfile 基础镜像换成 `debian:bookworm-slim` 即可（详见 README-docker.md）。
 

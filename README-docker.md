@@ -6,7 +6,7 @@
 
 - 官方三个压缩包中，只有 `mixly_server`（mixio + mixly + mixco，约 2.7GB）是服务端；`mixly4-linux-x64.zip` 和 `MixAI-linux-x64.zip` 是 NW.js **桌面版**，不适用于服务器部署。
 - `mixio` 是用 Node.js 16.17.0（pkg）打包的**glibc 动态链接 ELF**（x86-64 版 145MB），需要 GLIBC ≥ 2.17、libstdc++、libgcc。官方指令为 `mixio start / stop / install / help`（默认 HTTP 8080，HTTPS 8443，管理模式 18084），见 [gitee.com/mixly2/mixio](https://gitee.com/mixly2/mixio)。它同时是 Web、MQTT(1883)、WebSocket(8083/8084)、Yjs 协同(8082/8086) 服务，并托管 `../mixly`（编辑器）与 `../mixco`（课程）静态资源。
-- **多架构支持**：官方按机型提供 **x64 / arm64 / loong64** 运行包（各架构包内启动文件同名 `mixio`），按机器架构下载放入映射路径即可，容器不做架构转换。镜像做成 amd64+arm64 双架构 manifest；loong64 等其他架构在对应机器上用本仓库 Dockerfile 自行构建。
+- **多架构支持**：官方按机型提供 **x64 / arm64 / loong64** 运行包（各架构包内启动文件同名 `mixio`），按机器架构下载放入映射路径即可，容器不做架构转换。镜像构建 amd64+arm64+loong64 三架构 manifest（Alpine 3.21 起 loongarch64 为官方移植架构，gcompat/tini/su-exec 均有 loong64 包）；入口脚本启动时会解析运行包 ELF 头校验架构匹配，防止下错压缩包。
 - 数据落盘：SQLite 在 `mixio/storage/`，项目文件在 `mixio/store/`，日志在 `mixio/logs/`，配置/证书在 `mixio/config/`。**官方迁移方式是复制 `storage/reserve` 文件夹**——由于运行包整体挂载在宿主机目录，升级镜像天然不丢数据。
 
 ### 为什么 Alpine 还能跑 glibc 程序
@@ -17,7 +17,7 @@ Alpine 基础镜像仅 ~8MB，加 `gcompat`（glibc→musl 兼容层）+ `libstd
 
 | 文件 | 用途 |
 |---|---|
-| `Dockerfile` | Alpine 3.20 + gcompat + su-exec + tini 的运行环境镜像（约 15MB，amd64+arm64 双架构） |
+| `Dockerfile` | Alpine（`alpine:3` 滚动标签，始终最新 3.x 稳定版）+ gcompat + su-exec + tini 的运行环境镜像（约 15MB，amd64+arm64+loong64 三架构） |
 | `docker-entrypoint.sh` | 启动前检测运行包、提示放置路径、修正执行权限、以非 root 运行 |
 | `docker-compose.yml` | 群晖 Container Manager 可直接导入，含端口与挂载 |
 | `build-push.sh` | 本地 buildx 构建并同时推送 GHCR + Docker Hub |
@@ -47,13 +47,13 @@ docker login                  # Docker Hub
 GHCR_USER=RealKiro DOCKERHUB_USER=你的DockerHub用户名 ./build-push.sh v1.0
 ```
 
-镜像约 15MB，构建几秒完成，输出 `linux/amd64` + `linux/arm64` 双架构 manifest，ARM 群晖（DS223j 等）同样可拉取。
+镜像约 15MB，构建几秒完成，输出 `linux/amd64` + `linux/arm64` + `linux/loong64` 三架构 manifest，x64 / ARM / 龙芯群晖均可拉取。
 
 ## 架构说明
 
 - 官方按机型提供 **x64 / arm64 / loong64** 运行包，各架构包内启动文件同名 `mixio`；不清楚自己机型的架构可咨询主机厂家。
-- x64 / arm64 设备直接拉取多架构镜像，放入对应架构的运行包即可运行。
-- loong64 等其他架构：镜像 manifest 不包含该架构，在对应机器上用本仓库 Dockerfile 自行构建（`docker build -t mixly-server .`），compose 中把 `image:` 改为本地镜像名。
+- 三种架构设备都直接 `docker pull` 多架构镜像，放入对应架构的运行包即可运行。
+- 入口脚本启动时解析运行包 `mixio` 二进制的 ELF 头（e_machine 字段）校验架构匹配：x64↔x64、aarch64↔arm64、loongarch64↔loong64；不匹配会明确提示应下载的架构并退出，无法识别时（如非 ELF 文件）仅警告并继续。
 
 ## 构建后验证（gcompat 兼容性）
 

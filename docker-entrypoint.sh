@@ -1,14 +1,14 @@
 #!/bin/sh
-# Mixly 服务端容器入口：检测官方运行包 -> 修正权限 -> 以非 root 启动
-# 官方运行包按机器架构选择（x64 / arm64 / loong64，启动文件同名 mixio），
-# 放入映射路径即可；容器只提供运行环境，不做架构转换与下载。
+# Mixly 服务端容器入口：检测官方运行包 -> 校验架构匹配 -> 修正权限 -> 以非 root 启动
+# 官方运行包按机器架构提供（x64 / arm64 / loong64，启动文件同名 mixio），
+# 本脚本会在启动前校验运行包架构与机器是否一致，避免用户下错压缩包。
 set -e
 
 SERVER_DIR="/opt/mixly_server"
 MIXIO_DIR="$SERVER_DIR/mixio"
 BIN="$MIXIO_DIR/mixio"
 
-if [ ! -d "$MIXIO_DIR" ] || [ ! -d "$SERVER_DIR/mixly" ] || [ ! -d "$SERVER_DIR/mixco" ] || [ ! -f "$BIN" ]; then
+missing_package() {
     cat >&2 <<'EOF'
 ==========================================================================
  [!] 未检测到 Mixly 官方运行包，容器无法启动。
@@ -33,7 +33,50 @@ if [ ! -d "$MIXIO_DIR" ] || [ ! -d "$SERVER_DIR/mixly" ] || [ ! -d "$SERVER_DIR/
  检测通过后本提示不再出现。
 ==========================================================================
 EOF
+}
+
+# 读取 ELF 头 e_machine 字段（偏移 18，2 字节小端），输出架构名
+elf_arch() {
+    hdr=$(dd if="$1" bs=1 skip=18 count=2 2>/dev/null | od -An -tu1 2>/dev/null | tr -s ' \n' ' ')
+    set -- $hdr
+    case $(( ${1:-0} + ${2:-0} * 256 )) in
+        62)  echo "x64" ;;
+        183) echo "arm64" ;;
+        258) echo "loong64" ;;
+        *)   echo "unknown" ;;
+    esac
+}
+
+if [ ! -d "$MIXIO_DIR" ] || [ ! -d "$SERVER_DIR/mixly" ] || [ ! -d "$SERVER_DIR/mixco" ] || [ ! -f "$BIN" ]; then
+    missing_package
     exit 1
+fi
+
+# 环境校验：运行包架构须与机器架构一致（防止下错压缩包）
+case "$(uname -m)" in
+    x86_64)      HOST_ARCH="x64" ;;
+    aarch64)     HOST_ARCH="arm64" ;;
+    loongarch64) HOST_ARCH="loong64" ;;
+    *)           HOST_ARCH="" ;;
+esac
+
+if [ -n "$HOST_ARCH" ]; then
+    BIN_ARCH=$(elf_arch "$BIN")
+    if [ "$BIN_ARCH" != "unknown" ] && [ "$BIN_ARCH" != "$HOST_ARCH" ]; then
+        cat >&2 <<EOF
+==========================================================================
+ [!] 运行包与机器架构不匹配，容器无法启动。
+
+     当前机器架构:  $HOST_ARCH
+     运行包 mixio 架构: $BIN_ARCH（读取自 $BIN 的 ELF 头）
+
+     请从官方百度网盘下载【$HOST_ARCH】架构的 mixly_server 压缩包，
+     解压后替换映射路径中的内容，再重启容器。
+==========================================================================
+EOF
+        exit 1
+    fi
+    echo "[INFO] 运行包架构校验通过: $BIN_ARCH（机器: $HOST_ARCH）"
 fi
 
 # zip 解压后常丢失执行位；官方说明亦要求 chmod +x ./mixio
