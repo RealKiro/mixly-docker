@@ -102,6 +102,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: 镜像名转小写（Docker 仓库名不允许大写字母）
+        run: echo "GHCR_IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mixly-server" >> "$GITHUB_ENV"
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -149,6 +152,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: docker/setup-buildx-action@v3
+
+      - name: 镜像名转小写（Docker 仓库名不允许大写字母）
+        run: echo "GHCR_IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mixly-server" >> "$GITHUB_ENV"
 
       - name: Login to GHCR
         uses: docker/login-action@v3

@@ -7,6 +7,9 @@ set -euo pipefail
 
 GHCR_USER="${GHCR_USER:-RealKiro}"
 DOCKERHUB_USER="${DOCKERHUB_USER:-YOUR_DOCKERHUB_USERNAME}"   # 设为真实用户名则同时推 Docker Hub
+# Docker 仓库名必须全小写，统一归一化，避免 "repository name must be lowercase"
+GHCR_USER="$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')"
+DOCKERHUB_USER="$(printf '%s' "$DOCKERHUB_USER" | tr '[:upper:]' '[:lower:]')"
 TAG="${1:-latest}"
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"

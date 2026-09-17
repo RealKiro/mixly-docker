@@ -60,10 +60,10 @@ GHCR_USER=RealKiro DOCKERHUB_USER=你的DockerHub用户名 ./build-push.sh v1.0
 
 ```bash
 # 未挂载运行包时应打印放置指引并退出 —— 这本身就是入口脚本的自检
-docker run --rm ghcr.io/RealKiro/mixly-server:v1.0
+docker run --rm ghcr.io/realkiro/mixly-server:v1.0
 
 # 挂载本地运行包做完整验证
-docker run --rm -v "$(pwd)/mixly_server:/opt/mixly_server" -p 8080:8080 ghcr.io/RealKiro/mixly-server:v1.0
+docker run --rm -v "$(pwd)/mixly_server:/opt/mixly_server" -p 8080:8080 ghcr.io/realkiro/mixly-server:v1.0
 # 预期日志: [INFO] MixIO server listening on port 8080 / Storage Engine: SQLite
 ```
 
