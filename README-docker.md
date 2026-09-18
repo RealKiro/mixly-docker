@@ -18,11 +18,11 @@ Alpine 基础镜像仅 ~8MB，加 `gcompat`（glibc→musl 兼容层）+ `libstd
 | 文件 | 用途 |
 |---|---|
 | `Dockerfile` | Alpine（`alpine:3` 滚动标签，始终最新 3.x 稳定版）+ gcompat + su-exec + tini 的运行环境镜像（约 15MB，amd64+arm64+loong64 三架构） |
-| `docker-entrypoint.sh` | 启动前检测运行包、校验架构匹配、提示放置路径、修正执行权限、以非 root 运行 |
+| `docker-entrypoint.sh` | 启动前检测运行包、校验架构匹配、提示放置路径、修正执行权限、以非 root 后台启动并**守护容器存活**（转发停止信号做优雅退服） |
 | `docker-compose.yml` | 群晖 Container Manager 可直接导入，含端口与挂载 |
 | `build-push.sh` | 本地 buildx 构建并同时推送 GHCR + Docker Hub |
 | `.github/workflows/ci.yml` | CI 流水线：PR/推 main 跑测试与跨架构构建检查；v* 标签或手动触发时测试通过后推送 GHCR + Docker Hub |
-| `test/smoke-test.sh` | 冒烟测试：无需官方运行包，用假运行包 + ELF 桩验证缺包指引/架构校验/非 root 启动链路/镜像元数据 |
+| `test/smoke-test.sh` | 冒烟测试：无需官方运行包，用假运行包 + ELF 桩验证缺包指引/架构校验/非 root 启动链路/守护模式/镜像元数据 |
 
 ## 首次运行（三步）
 
@@ -38,6 +38,8 @@ Alpine 基础镜像仅 ~8MB，加 `gcompat`（glibc→musl 兼容层）+ `libstd
 管理员默认 `admin/public`，**上线后务必修改** `config.json` 中的 `ADMIN_PASSWORD`；离线内网可保留 `ALLOW_REGISTER`。如需外网访问，在 DSM 控制面板做端口映射或用 DSM 反向代理套 443。
 
 > 若容器反复重启且日志出现"未检测到 Mixly 官方运行包"，说明第 2 步的路径放错了——注意是把 `mixly_server` 文件夹**里面的内容**放到映射目录，而不是多套一层 `mixly_server/mixly_server`。
+
+> **容器启动正常、过一会儿自动停止？** 这是运行包内 `mixio start` 的固有行为：它 fork 出后台服务进程后，父进程随即 `process.exit()`（原生部署无碍，容器里主进程一退出容器就结束，restart 策略再拉起，形成循环）。入口脚本已改为「后台启动 + 前台守护」：容器会持续运行，日志跟随最新 `logs/*.log` 输出，收到停止信号时调用 `mixio stop` 优雅退服。**请使用 v1.0.1 及以上镜像**。
 
 ## 构建并推送镜像（本地，推荐）
 

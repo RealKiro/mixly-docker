@@ -1,7 +1,8 @@
 #!/bin/sh
-# Mixly 服务端容器入口：检测官方运行包 -> 校验架构匹配 -> 修正权限 -> 以非 root 启动
+# Mixly 服务端容器入口：检测官方运行包 -> 校验架构匹配 -> 修正权限 -> 以非 root 后台启动 -> 守护并转发停止信号
 # 官方运行包按机器架构提供（x64 / arm64 / loong64，启动文件同名 mixio），
 # 本脚本会在启动前校验运行包架构与机器是否一致，避免用户下错压缩包。
+# 注意：mixio 会自我 daemon 化（父进程退出），故不能用 exec 直接启动，见文件末尾说明。
 set -e
 
 SERVER_DIR="/opt/mixly_server"
@@ -90,5 +91,79 @@ mkdir -p "$MIXIO_DIR/storage" "$MIXIO_DIR/store" "$MIXIO_DIR/logs"
 chown -R mixly:mixly "$MIXIO_DIR/storage" "$MIXIO_DIR/store" "$MIXIO_DIR/logs" 2>/dev/null || true
 
 cd "$MIXIO_DIR"
+
+# ---------------------------------------------------------------------------
+# 启动方式（重要，勿改回 exec）
+#
+# 运行包内 mixio 的实际行为：
+#   start -> spawn 分离的子进程 `mixio debug`（stdout/stderr 重定向到 logs/*.log），
+#            父进程仅在启动阶段把日志文件旁路打印到 stdout，
+#            读到 "Database Connected!" 后 unref 子进程并 process.exit()
+#   debug -> 真正的服务进程，启动时把自身 PID 写入 pid.info
+#   stop  -> 读取 pid.info 并向其发送 SIGTERM
+#
+# 原生部署没问题，但容器里主进程（PID 1 的直接子进程）一退出，
+# 整个 PID 命名空间即被销毁：表现为"服务正常启动后过一会儿容器自动停止、
+# 日志里没有任何报错"，restart 策略再把它拉起，如此反复。
+#
+# 因此这里改为：后台启动 -> 保持前台存活守护 -> 收到停止信号时优雅退服。
+# ---------------------------------------------------------------------------
+
+# 清理上次运行残留的 pid.info：容器每次启动都是全新的 PID 命名空间，
+# 旧 PID 只会让后续 `mixio stop` 误杀无关进程
+rm -f "$MIXIO_DIR/pid.info"
+
+on_stop() {
+    echo "[INFO] 收到停止信号，正在停止 MixIO ..."
+    su-exec mixly:mixly ./mixio stop 2>/dev/null || true
+    exit 0
+}
+trap on_stop TERM INT
+
 # 官方指令：mixio start / stop / help（见 https://gitee.com/mixly2/mixio）
-exec su-exec mixly:mixly ./mixio start
+# 其自身会 daemon 化，命令本身很快返回
+su-exec mixly:mixly ./mixio start &
+START_PID=$!
+
+# 等 pid.info 出现（= 真正的服务进程已起来）；最多等 90 秒（慢机型留足余量）
+waited=0
+while [ ! -s "$MIXIO_DIR/pid.info" ]; do
+    # start 进程已结束且没写出 pid.info -> 未以后台方式运行，按它的退出码结束容器
+    kill -0 "$START_PID" 2>/dev/null || break
+    [ "$waited" -ge 90 ] && break
+    sleep 1
+    waited=$((waited + 1))
+done
+
+if [ ! -s "$MIXIO_DIR/pid.info" ]; then
+    set +e
+    wait "$START_PID"
+    rc=$?
+    set -e
+    # 少数 shell 对已回收的子进程返回 127，视作正常结束
+    [ "$rc" -eq 127 ] && rc=0
+    exit "$rc"
+fi
+
+SERVICE_PID="$(tr -dc '0-9' < "$MIXIO_DIR/pid.info" 2>/dev/null || true)"
+
+if [ -z "$SERVICE_PID" ]; then
+    echo "[WARN] pid.info 内无有效 PID，容器保持前台存活（MixIO 可能在当前进程内运行）。"
+else
+    echo "[INFO] MixIO 服务进程 PID: $SERVICE_PID，容器进入守护状态。"
+    # 服务进程的输出只写日志文件（原父进程退出后不再旁路），这里跟随最新日志，
+    # 让 docker logs / Container Manager 持续可观测
+    NEWEST_LOG="$(ls -t "$MIXIO_DIR"/logs/*.log 2>/dev/null | head -n 1 || true)"
+    if [ -n "$NEWEST_LOG" ]; then
+        tail -f "$NEWEST_LOG" &
+    fi
+fi
+
+# 守护：服务进程消失则结束容器（交由 restart 策略重新拉起）
+while :; do
+    if [ -n "$SERVICE_PID" ] && [ ! -d "/proc/$SERVICE_PID" ]; then
+        echo "[ERROR] MixIO 服务进程 $SERVICE_PID 已退出，容器结束（若配置 restart 策略会自动重启）。"
+        exit 1
+    fi
+    sleep 10 & wait $!
+done

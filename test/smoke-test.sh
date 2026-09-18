@@ -70,4 +70,48 @@ for p in 8080 8443 18084 1883 8082 8083 8084 8086; do
 done
 ok "T4 Entrypoint(tini) 与 8 个端口声明正确"
 
-echo "🎉 冒烟测试全部通过: $PASS/4"
+echo "=== T5 守护模式（mixio 自我 daemon 化后容器不应停止）==="
+tmp=$(mktemp -d)
+mkdir -p "$tmp/mixio" "$tmp/mixly"
+# 模拟官方 mixio 的真实行为：start 会起后台 debug 子进程后父进程退出，
+# debug 才是真正的服务进程（写 pid.info），stop 依据 pid.info 结束它
+cat > "$tmp/mixio/mixio" <<'STUB'
+#!/bin/sh
+case "$1" in
+  start)
+    ./mixio debug >> "logs/$(date +%H%M%S).log" 2>&1 &
+    sleep 1
+    echo "[INFO] MixIO server is running now."
+    exit 0
+    ;;
+  debug)
+    echo "[INFO] MixIO server is running with PID $$"
+    echo $$ > pid.info
+    while :; do echo "[INFO] heartbeat $$"; sleep 5; done
+    ;;
+  stop)
+    pid=$(cat pid.info 2>/dev/null)
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    echo "MixIO server with PID $pid is stopped."
+    ;;
+esac
+STUB
+chmod -R 777 "$tmp"   # 容器内以非 root(mixly) 运行，需可写 pid.info / logs
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+sleep 10
+if [ "$(docker inspect -f '{{.State.Running}}' "$cid")" != "true" ]; then
+    docker logs "$cid" 2>&1 | tail -20
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+    fail "T5 mixio daemon 化后容器不应停止（容器已退出）"
+fi
+c_logs=$(docker logs "$cid" 2>&1)
+echo "$c_logs" | grep -q "容器进入守护状态" || { docker rm -f "$cid" >/dev/null 2>&1; rm -rf "$tmp"; fail "T5 未进入守护状态"; }
+echo "$c_logs" | grep -q "heartbeat" || { docker rm -f "$cid" >/dev/null 2>&1; rm -rf "$tmp"; fail "T5 服务日志未跟随到容器输出"; }
+docker stop -t 15 "$cid" >/dev/null
+docker logs "$cid" 2>&1 | grep -q "收到停止信号" || { docker rm -f "$cid" >/dev/null 2>&1; rm -rf "$tmp"; fail "T5 停止时未走优雅退服"; }
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp"
+ok "T5 daemon 化后容器保持运行，docker stop 走优雅退服"
+
+echo "🎉 冒烟测试全部通过: $PASS/5"
