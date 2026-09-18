@@ -98,20 +98,26 @@ esac
 STUB
 chmod -R 777 "$tmp"   # 容器内以非 root(mixly) 运行，需可写 pid.info / logs
 cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t5_fail=""
 sleep 10
-if [ "$(docker inspect -f '{{.State.Running}}' "$cid")" != "true" ]; then
-    docker logs "$cid" 2>&1 | tail -20
-    docker rm -f "$cid" >/dev/null 2>&1 || true
-    rm -rf "$tmp"
-    fail "T5 mixio daemon 化后容器不应停止（容器已退出）"
+[ "$(docker inspect -f '{{.State.Running}}' "$cid")" = "true" ] || t5_fail="mixio daemon 化后容器不应停止"
+if [ -z "$t5_fail" ]; then
+    c_logs=$(docker logs "$cid" 2>&1)
+    echo "$c_logs" | grep -q "容器进入守护状态" || t5_fail="未进入守护状态"
+    echo "$c_logs" | grep -q "heartbeat" || t5_fail="服务日志未跟随到容器输出"
 fi
-c_logs=$(docker logs "$cid" 2>&1)
-echo "$c_logs" | grep -q "容器进入守护状态" || { docker rm -f "$cid" >/dev/null 2>&1; rm -rf "$tmp"; fail "T5 未进入守护状态"; }
-echo "$c_logs" | grep -q "heartbeat" || { docker rm -f "$cid" >/dev/null 2>&1; rm -rf "$tmp"; fail "T5 服务日志未跟随到容器输出"; }
-docker stop -t 15 "$cid" >/dev/null
-docker logs "$cid" 2>&1 | grep -q "收到停止信号" || { docker rm -f "$cid" >/dev/null 2>&1; rm -rf "$tmp"; fail "T5 停止时未走优雅退服"; }
+docker stop -t 15 "$cid" >/dev/null 2>&1 || true
+if [ -z "$t5_fail" ]; then
+    docker logs "$cid" 2>&1 | grep -q "收到停止信号" || t5_fail="停止时未走优雅退服"
+fi
+if [ -n "$t5_fail" ]; then
+    echo "----- 容器日志（末 30 行）-----"
+    docker logs "$cid" 2>&1 | tail -30 || true
+fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
-rm -rf "$tmp"
+# 容器内以 uid 100 写入的文件可能让 runner 用户无法删除；清理失败无所谓（runner 为一次性环境）
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t5_fail" ] || fail "T5 $t5_fail"
 ok "T5 daemon 化后容器保持运行，docker stop 走优雅退服"
 
 echo "🎉 冒烟测试全部通过: $PASS/5"
