@@ -585,11 +585,15 @@ if [ -z "$t15_fail" ]; then
         || t15_fail="未声明跳过官方启动器"
     log_has "$cid" "已追加 --enable-logging=stderr" \
         || t15_fail="未声明追加 Chromium 内部日志开关"
-    # 直连模式必须真的把 .host/nw 拉起来（桩会打印自己的标记）
-    log_has "$cid" "stub MixlyServer running" \
+    # 直连模式必须真的把 .host/nw 拉起来。
+    # 注意：make_stub 造的 .host/nw 是 gcc -static 的 C 程序，输出 "stub-nw-ok"
+    # 并立即退出；打印 "[INFO] stub MixlyServer running" 并常驻的是另一个
+    # MixlyServer shell 桩。两者不要搞混（v2.0.9 首轮 CI 就栽在这里）。
+    log_has "$cid" "stub-nw-ok" \
         || t15_fail="直连模式未启动 .host/nw"
 fi
 if [ -z "$t15_fail" ]; then
+    # .host/nw 桩会立即退出，容器可能已经停了；docker stop 对已停容器同样返回 0
     docker stop "$cid" >/dev/null 2>&1 || true
     sleep 2
     log_has "$cid" "NW.js 进程已退出，退出码" \
@@ -620,6 +624,9 @@ if [ -z "$t16_fail" ]; then
         || t16_fail="未开始最小窗口自检"
     log_has "$cid" "X 显示: :99" \
         || t16_fail="未报告自检所用的 X 显示"
+    # 必须真的把 .host/nw 拉起来（桩输出 stub-nw-ok）
+    log_has "$cid" "stub-nw-ok" \
+        || t16_fail="自检未运行 .host/nw"
     # 必须给出结论（通过/失败二选一），不能静默
     log_has "$cid" "结论" \
         || t16_fail="自检未给出结论"
