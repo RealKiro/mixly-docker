@@ -123,8 +123,9 @@ chmod 1777 /tmp/.X11-unix 2>/dev/null || true
 # 以 root 启动时：预建可写数据目录并交给 mixly 用户、修执行位，
 # 然后用 gosu 降权重新执行本脚本（之后 id -u != 0，跳过本段）。
 if [ "$(id -u)" = "0" ]; then
-    # MixSuite 的可写位置：mixio-app/{storage,logs,config,runtime}（服务数据）、
-    # mixio-app 本身（pid.info 等散落文件）、套件根目录下的 user-data（Chromium profile）。
+    # MixSuite 的可写位置：mixio-app/{storage,logs,config,runtime,store}（服务数据）、
+    # mixio-app 本身（pid.info、store 等散落文件/目录）、
+    # 套件根目录下的 user-data（Chromium profile）。
     # .host、mixly、mixco、mixmo 等静态大目录保持只读，不做递归 chown。
     #
     # 切记不要 chown 挂载根目录 $SERVER_DIR 本身：解压 / mktemp 出来的根目录
@@ -140,7 +141,8 @@ if [ "$(id -u)" = "0" ]; then
     chmod o+rx "$SERVER_DIR" 2>/dev/null || true
 
     for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
-              "$APP_DIR/runtime" "$SERVER_DIR/user-data"; do
+              "$APP_DIR/runtime" "$APP_DIR/store" "$APP_DIR/config/certs" \
+              "$SERVER_DIR/user-data"; do
         mkdir -p "$_d"
         # chown 在 Docker Desktop(WSL2/virtiofs)、NFS/CIFS 等卷上可能静默无效
         # （属主永远呈现为 root），因此不能只靠 chown：权限位必须兜底。
@@ -149,14 +151,31 @@ if [ "$(id -u)" = "0" ]; then
         # 不会误改 user-data 里 Chromium 遗留 SingletonLock 指向的目标。
         chmod -R a+rwX "$_d"
     done
-    # mixio-app 本身（非递归）：应用可能在此写 pid.info 等文件。
-    # 不碰 $SERVER_DIR（挂载根目录）——见上面的警告。
-    chown mixly:mixly "$APP_DIR"
 
-    # 自检：五个可写目录必须都存在。缺任何一个都直接报错退出，
+    # mixio-app 目录【本身】也必须可写。
+    #
+    # 这是实测踩到的坑：官方 mixio.js 的 init() 会顺序执行
+    #     mixio.js:920  mkdir logs
+    #     mixio.js:923  mkdir store      ← 在 mixio-app 下新建
+    #     mixio.js:926  mkdir config
+    #     mixio.js:992  mkdir config/certs
+    # 前三个我们早已预建并授权，唯独 store 漏了；而 chown 在 virtiofs/NFS 上
+    # 静默无效（属主仍是 root），mixio-app 保持 755，mixly 用户建不了 store，
+    # 于是 init() 在最前面就 EACCES 抛错：
+    #     Error: EACCES: permission denied, mkdir '.../mixio-app/store'
+    # 该异常被 nw-main.js 写进 runtime/nw-main-error.log，随后启动器探测
+    # 超时退出 —— 症状与之前一模一样，但根因完全不同。
+    #
+    # 因此这里对 mixio-app 本身补 chmod a+rwX：只改这一个目录的权限位、
+    # 不递归、不改属主，宿主机用户（属主）权限不受任何影响。
+    chown mixly:mixly "$APP_DIR" 2>/dev/null || true
+    chmod a+rwX "$APP_DIR"
+
+    # 自检：可写目录必须都存在。缺任何一个都直接报错退出，
     # 把问题暴露在启动阶段，而不是留到后面出现诡异症状。
     for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
-              "$APP_DIR/runtime" "$SERVER_DIR/user-data"; do
+              "$APP_DIR/runtime" "$APP_DIR/store" "$APP_DIR/config/certs" \
+              "$SERVER_DIR/user-data"; do
         if [ ! -d "$_d" ]; then
             echo "[entrypoint][ERROR] 数据目录创建失败: $_d" >&2
             ls -ld "$SERVER_DIR" "$APP_DIR" >&2 || true
@@ -165,7 +184,8 @@ if [ "$(id -u)" = "0" ]; then
     done
     log "root: 数据目录就绪: $(ls -d \
         "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
-        "$APP_DIR/runtime" "$SERVER_DIR/user-data" 2>&1 | tr '\n' ' ')"
+        "$APP_DIR/runtime" "$APP_DIR/store" "$APP_DIR/config/certs" \
+        "$SERVER_DIR/user-data" 2>&1 | tr '\n' ' ')"
 
     # -------------------------------------------------- 关键：预置 filter.json
     # MixIO 启动链里有若干处「假定文件已存在」的裸同步读写，缺文件即抛异常：
@@ -250,6 +270,43 @@ if [ "$(id -u)" = "0" ]; then
     fi
     rm -f "$SERVER_DIR/user-data/.entrypoint-write-test" 2>/dev/null || true
 
+    # 实测 mixly 对 mixio-app 目录【本身】的写入能力。
+    # 官方 mixio.js 的 init() 会在这里顺序 mkdir logs/store/config/config/certs
+    # （mixio.js:920/923/926/992）。子目录我们能预建，但目录本身的写权限
+    # 决定官方能否新建条目——chown 在 virtiofs/NFS 上无效时这里就会失败，
+    # 表现为 init() 在最前面 EACCES、整份日志只有一句
+    # "Error: EACCES: permission denied, mkdir '.../mixio-app/store'"。
+    # 提前探针可把此类故障变成启动期的明确报错，而不是 120 秒后静默重启。
+    if ! gosu mixly:mixly sh -c "touch '$APP_DIR/.entrypoint-write-test'" 2>/dev/null; then
+        echo "[entrypoint][ERROR] mixly 用户无法在 $APP_DIR 下创建文件" >&2
+        echo "[entrypoint][ERROR] 官方 mixio.js 的 init() 需要在此新建 store/ 等目录，" >&2
+        echo "[entrypoint][ERROR] 写不进去会导致 MixIO 加载失败（见 nw-main-error.log）。" >&2
+        ls -ld "$APP_DIR" >&2 || true
+        echo "[entrypoint][ERROR] 在宿主机执行: chmod a+rwX '$APP_DIR'" >&2
+        exit 1
+    fi
+    rm -f "$APP_DIR/.entrypoint-write-test" 2>/dev/null || true
+
+    # 实测 mixly 对 storage/reserve 的写入能力：SQLite 建库、filter.json、
+    # 1.db..8.db 模板复制都在这里进行。
+    if ! gosu mixly:mixly sh -c "touch '$APP_DIR/storage/reserve/.entrypoint-write-test'" 2>/dev/null; then
+        echo "[entrypoint][ERROR] mixly 用户无法写入 $APP_DIR/storage/reserve" >&2
+        echo "[entrypoint][ERROR] SQLite 数据库与 filter.json 将无法创建。" >&2
+        ls -ld "$APP_DIR/storage" "$APP_DIR/storage/reserve" >&2 || true
+        exit 1
+    fi
+    rm -f "$APP_DIR/storage/reserve/.entrypoint-write-test" 2>/dev/null || true
+
+    # 轮换上一次残留的 nw-main-error.log。
+    # 该文件在上一次失败后会留在挂载卷里。不清掉的话，容器每次重启都会把
+    # 上一次的旧错误重新打印一遍（watcher 与退出分支都会读它），
+    # 用户会误以为「又出了一个新错误」。这里改名留存为 .prev，
+    # 既避免误导，又不丢证据；新的一次性错误由 watcher 实时捕获。
+    if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
+        mv -f "$APP_DIR/runtime/nw-main-error.log" \
+              "$APP_DIR/runtime/nw-main-error.log.prev" 2>/dev/null || true
+    fi
+
     exec gosu mixly:mixly "$0" "$@"
 fi
 
@@ -333,21 +390,37 @@ if [ "$(id -u)" != "0" ]; then
     # nw-main.js 在 require('./mixio.js') 抛错时，会把完整 stack 写入
     # mixio-app/runtime/nw-main-error.log。这是「顶层 require 失败」这类
     # 致命错误的唯一可观测点，但它不会出现在 docker logs 里，必须主动跟随。
-    # 典型内容：Cannot find module 'node:sqlite' —— NW.js 内置 Node 版本
-    # 过旧时，sqlite-native.js 顶层的 require('node:sqlite') 会直接失败，
-    # 整个 mixio.js 加载中止，服务永远起不来。
+    # 已实测过的两类内容：
+    #   EACCES: permission denied, mkdir '.../mixio-app/store'
+    #       → init() 建目录失败，属 chown 无效导致 mixio-app 不可写
+    #   Cannot find module 'node:sqlite'
+    #       → NW.js 内置 Node 版本过旧，需反馈官方
+    # 按内容分流诊断，不要把每种错误都套同一句结论。
     ( _werr=0
       while [ "$_werr" -lt 180 ]; do
           sleep 1
           if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
+              _werr_text=$(cat "$APP_DIR/runtime/nw-main-error.log" 2>/dev/null)
               echo "" >&2
               echo "=========================================================" >&2
               echo "[entrypoint][ERROR] MixIO 加载失败！以下是 nw-main.js 记录的完整错误：" >&2
               echo "=========================================================" >&2
-              cat "$APP_DIR/runtime/nw-main-error.log" >&2
+              echo "$_werr_text" >&2
               echo "=========================================================" >&2
-              echo "[entrypoint][ERROR] 常见原因：NW.js 内置 Node 版本不支持 node:sqlite" >&2
-              echo "[entrypoint][ERROR] （mixio.js 依赖 SQLite 存储引擎）。请把本段日志反馈给官方。" >&2
+              case "$_werr_text" in
+                  *EACCES*|*"permission denied"*)
+                      echo "[entrypoint][ERROR] 这是【文件权限】问题：mixio.js 的 init() 无法创建数据目录。" >&2
+                      echo "[entrypoint][ERROR] 在宿主机上对套件根执行：chmod -R a+rwX <mixio-app 所在目录>" >&2
+                      echo "[entrypoint][ERROR] 若挂载来源是 NFS/CIFS/Windows 共享，请改成本地目录或 ext4。" >&2
+                      ;;
+                  *"node:sqlite"*|*"Cannot find module"*)
+                      echo "[entrypoint][ERROR] 常见原因：NW.js 内置 Node 版本不支持 node:sqlite" >&2
+                      echo "[entrypoint][ERROR] （mixio.js 依赖 SQLite 存储引擎）。请把本段日志反馈给官方。" >&2
+                      ;;
+                  *)
+                      echo "[entrypoint][ERROR] 请把本段完整日志反馈，以便定位。" >&2
+                      ;;
+              esac
               echo "=========================================================" >&2
               break
           fi
@@ -378,6 +451,7 @@ fi
               log "诊断: 检测到 runtime/nw-main-error.log（MixIO 加载失败），完整内容已打印在上方"
           fi
           log "诊断: storage=$(ls "$APP_DIR/storage" 2>/dev/null | tr '\n' ' ')reserve=$(ls "$APP_DIR/storage/reserve" 2>/dev/null | tr '\n' ' ')"
+          log "诊断: mixio-app 权限=$(ls -ld "$APP_DIR" 2>/dev/null)（mixly 需能在其下新建目录）"
       fi
   done
   log "就绪检查: 10 分钟内 8443 始终未监听。请执行："
@@ -402,6 +476,9 @@ case "$_rc" in
          log "       这几乎总是意味着 MixIO 内部初始化抛错且异常被吞掉，并非'正常退出'。"
          if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
              log "       >>> 已有 runtime/nw-main-error.log，其内容已打印在上方"
+         elif [ -s "$APP_DIR/runtime/nw-main-error.log.prev" ]; then
+             log "       >>> 本次未生成新错误日志，但存在上一次的 nw-main-error.log.prev"
+             log "       >>> docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log.prev'"
          else
              log "       >>> 若上方无任何 [mixio] 输出，说明 mixio.js 加载后在init/daemon_start 阶段静默失败"
              log "       >>> 依次执行以下命令取证（把输出反馈给官方）："

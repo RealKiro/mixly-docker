@@ -170,7 +170,7 @@ NW.js（Chromium）要在 `user-data` 目录创建 SingletonLock，写不进去�
 
 **用 v2.0.1 及以上镜像即可**（入口脚本已改为 `chmod a+rwX` 权限位兜底 + 启动前实测写入，失败会给出明确诊断而非无限重启）。若你还在用 v2.0，升级镜像后重启容器；`user-data` 里已有的数据不受影响。
 
->补充：升级到最新版（v2.0.6+）后请直接用 `latest`。若容器仍在重启，先排除这一类权限问题，再看Q11——两者的日志特征完全不同（Q8 有 `SingletonLock: Permission denied`，Q11 一片空白）。
+>补充：升级到最新版（v2.0.7+）后请直接用 `latest`。若容器仍在重启，先排除这一类权限问题，再看 Q11——两者的日志特征完全不同（Q8 有 `SingletonLock: Permission denied`，Q11 是一片空白或 `EACCES ... mkdir`）。另注意：`docker run` / `compose up` 不会自动拉取新版 `latest`，升级必须先 `docker pull` 再删旧容器。
 
 **Q9：日志里这些报错要不要管？**
 
@@ -209,7 +209,8 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 | 无日志、`logs/` 为空 | MixIO 还没进入初始化 | 先确认第 1 步不是 `starting`，再看第 3 步端口 |
 | `EADDRINUSE` / 端口被占 | 同容器内端口冲突或旧进程残留 | `docker exec <容器名> sh -c 'cat /opt/mixly_server/mixio-app/pid.info'` 看 PID 是否存在；容器重建即可清干净 |
 | 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | compose 加 `shm_size: '1gb'`、`docker run` 加 `--shm-size=1g`，并留1.5GB+ 内存 |
-| 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；多数情况升级到 v2.0.6 即可 |
+| 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；v2.0.6 起会自动打印 `runtime/nw-main-error.log`，多数情况升级到 v2.0.7 即可 |
+| `EACCES: permission denied, mkdir '.../mixio-app/store'` | `mixio-app` 目录本身对 mixly 用户不可写（`chown` 在 virtiofs/NFS 上无效） | 升级到 v2.0.7+；或在宿主机 `chmod -R a+rwX <mixly-app 所在目录>` |
 
 **Q11：容器每隔约 120 秒自动重启，退出码 0，`docker logs` 完全空白**
 
@@ -217,48 +218,71 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 
 ```
  mixio.js:929    if (!fs.existsSync(storage)) { ...建库、写 filter.json... }
- mixio.js:6626   filterPath = <storage>/reserve/filter.json
+ mixio.js:920    mkdir logs      L923 mkdir store      L926 mkdir config
  mixio.js:6756   JSON.parse(fs.readFileSync(filterPath))     ← 无 try/catch
  mixio.js:7683   daemon_start().then(() => startOnce())     ← 无 .catch
  nw-boot.html    探测 8443，120 次 × 500ms 失败后放弃 → 退出码 0
 ```
 
-官方**只在 `storage` 目录不存在时**才创建 `filter.json`；而容器为了 `chown`/`chmod` 会预先建好 `storage`，官方因此认为「已初始化」而跳过创建 → 6756 行读 `filter.json` 得到 `ENOENT` 并抛错 → 由于 `.then()` 没有 `.catch()`，异常被彻底吞掉：不打印、不退出、8443 永不监听 → 启动器探测约 120 秒后放弃、退出码 0 → 重启策略再拉起。
+**两个已实测确认的触发路径**（都会得到完全相同的「120 秒重启 + 日志空白」）：
 
-**v2.0.6 起镜像已自动预置 `storage/reserve/filter.json`，多数情况下升级镜像即可正常启动：**
+1. **`filter.json` 缺失**（v2.0.6 修复）。官方**只在 `storage` 目录不存在时**才创建 `filter.json`；而容器为了 `chown`/`chmod` 会预先建好 `storage`，官方因此认为「已初始化」而跳过创建 → 6756 行读 `filter.json` 得到 `ENOENT` 并抛错。
+
+2. **`mixio-app` 目录本身不可写**（v2.0.7 修复）。官方 `init()` 要顺序新建 `logs`/`store`/`config`/`config/certs`，其中 `store` 就在 `mixio-app` 下面。若 `chown` 在 Docker Desktop(WSL2/virtiofs)/NFS/CIFS 上静默无效，`mixio-app` 保持 root:root 755，mixly 用户建不了 `store`，`init()` 在最前面就 `EACCES` 抛错：
+
+   ```
+   Error: EACCES: permission denied, mkdir '/opt/mixly_server/mixio-app/store'
+       at init (/opt/mixly_server/mixio-app/mixio.js:923:12)
+   ```
+
+由于 `.then()` 没有 `.catch()`，上述任何一种异常都被彻底吞掉：不打印、不退出、8443 永不监听 → 启动器探测约 120 秒后放弃、退出码 0 → 重启策略再拉起。
+
+**v2.0.6 / v2.0.7 起镜像已分别覆盖这两条路径，多数情况下升级镜像即可正常启动：**
 
 ```bash
-# 1) 换成新镜像
+# 1) 换成新镜像（注意：docker run / compose up 不会自动拉新版 latest）
+docker pull ghcr.io/realkiro/mixly-server:latest
 docker rm -f <容器名>
 docker run -d --name <容器名> --restart unless-stopped --shm-size=1g \
   -p 8443:8443 -p 18084:18084 -p 1883:1883 -p 8083:8083 -p 8084:8084 -p 8082:8082 -p 8086:8086 \
   -v /你的路径/mixly_server:/opt/mixly_server \
   ghcr.io/realkiro/mixly-server:latest
 
-# 2) 确认这行出现（说明预置成功）
+# 2) 确认这行出现（说明 v2.0.6+ 真的跑起来了）
 docker logs <容器名> 2>&1 | grep 已预置
 ```
 
-如果升级后仍反复重启，说明是另一类问题，请按下面顺序取证并把结果反馈给官方：
+如果升级后仍反复重启，说明是另一类问题。v2.0.6 起 `runtime/nw-main-error.log` 会被自动打印到 `docker logs`，先看它：
 
 ```bash
-# A) mixio.js 顶层加载失败时，nw-main.js 会把完整堆栈写到这个文件
-#    （最常见的具体原因：NW.js 内置 Node 版本不支持 node:sqlite）
+# A) mixio.js 加载失败时，nw-main.js 会把完整堆栈写到这里（已自动打印，这里可复查）
 docker exec <容器名> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log'
 
-# B) 关键数据文件是否齐备（filter.json 必须存在且是合法 JSON）
-docker exec <容器名> sh -c 'ls -la /opt/mixly_server/mixio-app/storage /opt/mixly_server/mixio-app/storage/reserve'
+# B) mixio-app 目录本身的权限（mixly 需能在其下新建目录，权限位应含 rwx）
+docker exec <容器名> sh -c 'ls -ld /opt/mixly_server/mixio-app /opt/mixly_server/mixio-app/store'
 
 # C) 端口到底有没有起来
 docker exec <容器名> sh -c 'netstat -lntp | grep -E "8443|18084"'
 ```
 
-v2.0.6 起入口脚本会自动完成以下动作，不必再手工取证：
+错误内容按类型分流：
+
+| nw-main-error.log 关键字 | 含义 | 处理 |
+|---|---|---|
+| `EACCES: permission denied, mkdir` | 文件权限问题，`mixio-app` 对 mixly 不可写 | 宿主机执行 `chmod -R a+rwX <mixio-app 所在目录>`；挂载来源若是 NFS/CIFS/Windows 共享，改成本地目录或 ext4 |
+| `Cannot find module 'node:sqlite'` | NW.js 内置 Node 版本过旧，不支持 `node:sqlite` | 属于官方包问题，请把完整日志反馈给米思奇官方 |
+
+v2.0.6 / v2.0.7 起入口脚本会自动完成以下动作，不必再手工取证：
 
 - 预置 `storage/reserve/filter.json`（缺失或非法时自动修正为 `{}`）
-- 主动捕获并打印 `runtime/nw-main-error.log` 的完整内容（NW.js 不会把它写进 `docker logs`）
+- 预建 `mixio-app/store`、`mixio-app/config/certs`，并对 `mixio-app` 目录本身 `chmod a+rwX`
+- 启动前实测 mixly 对 `user-data`、`mixio-app`、`storage/reserve` 三处的写入能力，失败即明确报错退出
+- 主动捕获并打印 `runtime/nw-main-error.log` 的完整内容，并按错误类型分流诊断
+- 把上一次残留的 `nw-main-error.log` 轮换为 `.prev`，避免旧错误被反复误读为新故障
 - 退出码 0 时明确指出「这是就绪探测超时，不是正常退出」并打印取证命令
-- 就绪检查期间输出 `storage` 目录实况
+- 就绪检查期间输出 `storage` 目录实况与 `mixio-app` 权限
+
+> **注意**：`docker run` / `docker compose up` 在本地已存在同名 `latest` tag 时**不会**拉取新镜像。升级必须 `docker pull`（compose 用 `docker compose pull`）后**删除旧容器再启动**，否则跑的仍是旧版——旧版与新版的日志文案不同，可用 `docker logs | grep 已预置` 判断当前到底跑的是哪一版。
 
 ## 致谢与声明
 

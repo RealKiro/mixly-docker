@@ -355,4 +355,129 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t9_fail" ] || fail "T9 $t9_fail"
 ok "T9 退出码 0 被正确解读为就绪探测超时并给出取证路径"
 
-echo "🎉 冒烟测试全部通过: $PASS/9"
+echo "=== T10 mixio-app 本身可写 + store/config-certs 预建（EACCES 根因回归）==="
+# 实测踩到的坑（v2.0.6 仍在复现）：官方 mixio.js 的 init() 顺序执行
+#     L920 mkdir logs   L923 mkdir store   L926 mkdir config   L992 mkdir config/certs
+# 入口脚本此前只授权了 storage/logs/config/runtime/user-data，漏了 store，
+# 且只 chown 了 mixio-app 而没 chmod —— chown 在 Docker Desktop(WSL2/virtiofs)/
+# NFS/CIFS 上静默无效，mixio-app 保持 root:root 755，mixly(uid 996) 建不了 store：
+#     Error: EACCES: permission denied, mkdir '.../mixio-app/store'
+# 该异常被 nw-main.js 写进 runtime/nw-main-error.log，启动器随后探测超时退出。
+# 本用例锁定：mixio-app 目录本身对 mixly 可写、store 与 config/certs 已预建。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t10_fail=""
+wait_log "$cid" "stub MixlyServer running" 60 || t10_fail="桩二进制未被 exec 执行"
+if [ -z "$t10_fail" ]; then
+    [ -d "$tmp/mixio-app/store" ] \
+        || t10_fail="未预建 mixio-app/store（官方 init() 要在 mixio-app 下新建它）"
+fi
+if [ -z "$t10_fail" ]; then
+    [ -d "$tmp/mixio-app/config/certs" ] \
+        || t10_fail="未预建 mixio-app/config/certs（官方要往里写默认证书）"
+fi
+if [ -z "$t10_fail" ]; then
+    # 关键：mixio-app 目录【本身】必须允许 mixly 新建条目。
+    # chown 在 virtiofs 上无效时，只有 chmod a+rwX 能救这一种情况。
+    if ! docker exec "$cid" sh -c \
+        "gosu mixly sh -c 'touch /opt/mixly_server/mixio-app/.t10'" >/dev/null 2>&1; then
+        t10_fail="mixly 无法在 mixio-app 下新建文件（store 等目录将创建失败，EACCES）"
+    else
+        docker exec "$cid" rm -f /opt/mixly_server/mixio-app/.t10 >/dev/null 2>&1 || true
+    fi
+fi
+if [ -z "$t10_fail" ]; then
+    # store 与 config/certs 也必须对 mixly 可写（官方往里写用户文件/证书）
+    for _d in store config/certs; do
+        if ! docker exec "$cid" sh -c \
+            "gosu mixly sh -c 'touch /opt/mixly_server/mixio-app/$_d/.t10'" >/dev/null 2>&1; then
+            t10_fail="mixly 无法写入 mixio-app/$_d"
+            break
+        fi
+        docker exec "$cid" rm -f "/opt/mixly_server/mixio-app/$_d/.t10" >/dev/null 2>&1 || true
+    done
+fi
+if [ -n "$t10_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+    echo "----- 宿主机 mixio-app 视图 -----"
+    ls -la "$tmp/mixio-app" 2>&1 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t10_fail" ] || fail "T10 $t10_fail"
+ok "T10 mixio-app 本身可写、store/config-certs 已预建且对 mixly 可写"
+
+echo "=== T11 EACCES 错误的定向诊断 ==="
+# nw-main-error.log 的内容决定诊断方向：权限类错误必须指向 chmod/文件系统，
+# 而不是一律甩给 node:sqlite。曾因一律归因 node:sqlite 而多绕了数轮。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cat > "$tmp/MixlyServer" <<'STUB'
+#!/bin/sh
+echo "[INFO] stub MixlyServer running (foreground)"
+mkdir -p "$PWD/mixio-app/runtime"
+cat > "$PWD/mixio-app/runtime/nw-main-error.log" <<'ERR'
+Error: EACCES: permission denied, mkdir '/opt/mixly_server/mixio-app/store'
+    at Object.mkdirSync (node:fs:1651:26)
+    at init (/opt/mixly_server/mixio-app/mixio.js:923:12)
+ERR
+sleep 30
+STUB
+chmod +x "$tmp/MixlyServer"
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t11_fail=""
+wait_log "$cid" "MixIO 加载失败" 60 || t11_fail="未捕获 runtime/nw-main-error.log"
+if [ -z "$t11_fail" ]; then
+    logs=$(docker logs "$cid" 2>&1)
+    echo "$logs" | grep -q "EACCES: permission denied, mkdir" \
+        || t11_fail="错误详情未完整打印"
+    echo "$logs" | grep -q "文件权限" \
+        || t11_fail="未识别为文件权限类错误（会把用户误导到 node:sqlite）"
+    echo "$logs" | grep -q "chmod -R a+rwX" \
+        || t11_fail="未给出 chmod 修复命令"
+fi
+if [ -n "$t11_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t11_fail" ] || fail "T11 $t11_fail"
+ok "T11 EACCES 被定向诊断为权限问题并给出 chmod 修复命令"
+
+echo "=== T12 陈旧 nw-main-error.log 轮换（避免旧错误反复误导）==="
+# nw-main-error.log 在上一次失败后会留在挂载卷里。若不轮换，容器每次重启
+# 都会把【上一次】的旧错误重新打印一遍，用户会误以为出现了新故障。
+# 入口脚本应改名为 .prev 留存，新错误由 watcher 实时捕获。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+mkdir -p "$tmp/mixio-app/runtime"
+echo "STALE-ERROR-FROM-PREVIOUS-RUN" > "$tmp/mixio-app/runtime/nw-main-error.log"
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t12_fail=""
+wait_log "$cid" "stub MixlyServer running" 60 || t12_fail="桩二进制未被 exec 执行"
+if [ -z "$t12_fail" ]; then
+    # 陈旧错误不得作为「本次加载失败」被打印
+    if docker logs "$cid" 2>&1 | grep -q "STALE-ERROR-FROM-PREVIOUS-RUN"; then
+        t12_fail="上一次的陈旧错误被当成新错误重复打印（会误导排查方向）"
+    fi
+fi
+if [ -z "$t12_fail" ]; then
+    # 但证据不能丢：必须留存为 .prev
+    [ -f "$tmp/mixio-app/runtime/nw-main-error.log.prev" ] \
+        || t12_fail="陈旧错误未被留存为 nw-main-error.log.prev（证据丢失）"
+fi
+if [ -n "$t12_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+    echo "----- runtime 目录 -----"
+    ls -la "$tmp/mixio-app/runtime" 2>&1 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t12_fail" ] || fail "T12 $t12_fail"
+ok "T12 陈旧 nw-main-error.log 被轮换为 .prev，不再重复误导"
+
+echo "🎉 冒烟测试全部通过: $PASS/12"
