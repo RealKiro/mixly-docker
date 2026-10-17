@@ -179,7 +179,7 @@ v2.0.2 起，容器正常运行时日志里只会剩下**无害噪音**，可对
 | 日志片段 | 性质 |
 |---|---|
 | `dbus/bus.cc: Failed to connect to the bus` / `org.freedesktop.DBus...` | 无害。容器内无 dbus daemon，Chromium 每次启动必报几十行 |
-| `XGetWindowAttributes failed for window 0` | **单独出现时无害**（Xvfb 下的窗口告警，窗口 ID 非零时是良性噪音）；但若它紧邻「进程数秒内退出 + 退出码 0」，则是窗口层故障的信号——v2.1.0 起会自动取证，见 Q11 路径 3 |
+| `XGetWindowAttributes failed for window 0` | **单独出现时无害**（Xvfb 下的窗口告警，窗口 ID 非零时是良性噪音）；但若它紧邻「进程数秒内退出 + 退出码 0」，则是窗口层故障的信号——v2.1.0 已定位根因（官方启动器的 `--ozone-platform=x11` 在 Xvfb 下建不了窗口），v2.2.0 起默认改用不带 ozone 的直连方式，该故障不再出现，见 Q11 路径 3 |
 | 完全没有 `Checking ports` / `Starting NW runtime` / `Loading MixIO service` | 无害。官方启动器父进程的 stdout 在管道下全缓冲，这些进度会随缓冲区丢失，**看不到不代表没执行**；见 Q11 路径 4 |
 | `chrome_crashpad_handler: --database is required` | 无害。崩溃上报组件，NW.js 自带 |
 | `Fontconfig error: No writable cache directories` / `Failed to create .../pki/nssdb` | **v2.0.1 及更早会出现**；v2.0.2 已预建可写的 `.cache` / `.local/share` 与 XDG 目录，升级后消失 |
@@ -212,7 +212,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 | 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | compose 加 `shm_size: '1gb'`、`docker run` 加 `--shm-size=1g`，并留1.5GB+ 内存 |
 | 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；v2.0.6 起会自动打印 `runtime/nw-main-error.log`，多数情况升级到 v2.0.8 即可 |
 | `EACCES: permission denied, mkdir '.../mixio-app/store'` | `mixio-app` 目录本身对 mixly 用户不可写（`chown` 在 virtiofs/NFS 上无效） | 升级到 v2.0.7+；或在宿主机 `chmod -R a+rwX <mixly-app 所在目录>` |
-| 容器**只活几秒**就重启、退出码 0、日志有 `XGetWindowAttributes failed for window 0`，且 `nw-main-error.log` 无新内容 | **NW 壳/窗口层故障**（窗口句柄为 0，从未创建成功），见 Q11 路径 3 | 升级到 v2.1.0：重启循环会自动取证并轮换启动策略，把 `自动取证开始` 到 `自动取证结束` 之间的日志反馈即可 |
+| 容器**只活几秒**就重启、退出码 0、日志有 `XGetWindowAttributes failed for window 0`，且 `nw-main-error.log` 无新内容 | **NW 壳/窗口层故障**（窗口句柄为 0，从未创建成功），见 Q11 路径 3 | 升级到 v2.2.0：默认启动方式已避开该根因；若仍遇到，重启循环会自动取证并轮换启动策略，把 `自动取证开始` 到 `自动取证结束` 之间的日志反馈即可 |
 
 **Q11：容器反复自动重启、退出码 0，`docker logs` 里看不到真实原因**
 
@@ -237,7 +237,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
        at init (/opt/mixly_server/mixio-app/mixio.js:923:12)
    ```
 
-3. **NW 壳 / 窗口层故障：进程只活 2~3 秒**（v2.1.0 起自动取证 + 策略轮换，根因待定位）。这是 1、2 都修好之后暴露出来的下一层。日志特征与 1、2 **明显不同**：
+3. **NW 壳 / 窗口层故障：进程只活 2~3 秒**（v2.1.0 定位根因，v2.2.0 起默认避开）。这是 1、2 都修好之后暴露出来的下一层。日志特征与 1、2 **明显不同**：
 
    ```
    16:06:40  正在启动 MixlyServer
@@ -246,6 +246,8 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
    ```
 
    关键判据：**存活只有几秒**（1、2 是约 120 秒），且 `runtime/nw-main-error.log` **没有新内容**——说明 `mixio.js` 已加载成功、`init()` 也通过了，故障不在 MixIO 初始化，而在 NW 壳。`XGetWindowAttributes failed for window 0` 里的 **window 0** 表示窗口句柄为空，即窗口从未真正创建成功、随后被销毁；NW.js 的默认行为是「所有窗口关闭即退出」，于是得到退出码 0。
+
+   **根因（v2.1.0 实测确认）**：官方 `MixlyServer` 启动器 fork 出 `.host/nw` 时传了 `--ozone-platform=x11 --ozone-platform-hint=x11`。Chromium 的 ozone/X11 后端在 Xvfb 下连**隐藏窗口**（官方 `package.json` 主窗口 `show: false`）都创建失败，窗口句柄为 0 → 所有窗口被关闭 → NW.js 以退出码 0 结束，全程约 3 秒。注意此时 **MixIO 各服务其实已经就绪**（8443 端口探针有响应、`Database Connected!` 已打印），死的只是窗口层。同一环境、同一运行包，**不指定 ozone**（Chromium 自动探测 X11）时完全正常：1883/8082-8086/8443/18084 全部监听，容器长期存活——v2.2.0 起这就是默认启动方式。
 
    已实测**证伪**的几个猜测，列出来避免重复走弯路：
 
@@ -257,7 +259,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
    | 端口冲突触发 `Continue? [y/N]` | 启动前端口快照显示 8443/18084 等均空闲 |
    | dbus 报错（`Could not parse server address`） | 容器内无 dbus daemon，libdbus 经 X11 autolaunch 读不到根窗口属性必报此错；Chromium 社区（Gentoo bug 879837）已证实它与进程退出无关 |
 
-   v2.0.8 起入口脚本会打印 `本次存活 Ns` 并按此时长自动分流诊断；**v2.0.9 起提供手动诊断开关，v2.1.0 起全自动取证 + 策略轮换（见下节），不需要执行任何命令**。
+   v2.0.8 起入口脚本会打印 `本次存活 Ns` 并按此时长自动分流诊断；**v2.1.0 起全自动取证 + 策略轮换，v2.2.0 起把实测可用的「直连无 ozone」提为默认策略（见下节），不需要执行任何命令**。
 
 4. **官方启动器自身的可观测性缺陷**（v2.0.9 新增旁路模式）。`MixlyServer` 是 `fork` + `execv` 的壳，父进程负责打印 `Checking ports` / `Port conflict detected` / `Starting NW runtime` / `Loading MixIO service` 等进度——但**父进程的 stdout 在管道下是全缓冲的**，容器非 TTY 时这些消息会随缓冲区一起丢失。所以「日志里看不到启动器进度」是正常的，不代表没执行；反之，一旦启动器真的在 `Checking ports` 阶段退出，你同样看不到任何原因。它还有 `Continue? [y/N]` 交互询问，非 TTY 下读 stdin 立即 EOF。
 
@@ -276,9 +278,11 @@ docker run -d --name <容器名> --restart unless-stopped --shm-size=1g \
 docker logs <容器名> 2>&1 | grep -E "已预置|已清理残留 PID 文件"
 ```
 
-### 第 3 条路径：v2.1.0 起全自动取证 + 启动策略轮换
+### 第 3 条路径：v2.1.0 起全自动取证 + 策略轮换（v2.2.0 起根因已避开）
 
-升级到 v2.1.0 后**不需要执行任何诊断命令**。入口脚本会在每次「短命-0」失败时，自动打印一段 `自动取证开始 … 自动取证结束` 的日志：
+**v2.2.0 起，上面路径 3 的根因（官方启动器的 `--ozone-platform=x11` 在 Xvfb 下建不了窗口）已在默认启动方式中避开**——入口脚本默认直连 `.host/nw` 且不指定 ozone，让 Chromium 自动探测 X11。绝大多数部署升级后直接正常，不需要任何操作。
+
+万一你的环境不同（例如真实 X 服务器、或将来官方改了参数），自动兜底依然在：每次「短命-0」失败时，入口脚本会自动打印一段 `自动取证开始 … 自动取证结束` 的日志：
 
 | 取证项 | 回答的问题 |
 |---|---|
@@ -287,18 +291,18 @@ docker logs <容器名> 2>&1 | grep -E "已预置|已清理残留 PID 文件"
 | `runtime/nw-main-error.log` | `mixio.js` 顶层加载是否失败（空 = 已加载成功，故障在 NW 壳） |
 | 进程列表 + Xvfb 存活状态 | Xvfb 是否被误杀 |
 | `xdpyinfo`（X 服务器 visual 与扩展） | 窗口建失败时最常见的环境根因（如缺 ARGB visual / RANDR / DAMAGE） |
-| NW.js 最小窗口自检（最小 NW 应用） | 一刀区分「镜像环境问题」与「MixSuite 应用层问题」 |
+| NW.js 最小窗口自检（双探针：无 ozone 主探针 + ozone 对照探针） | 一刀区分「镜像环境问题」与「MixSuite 应用层问题」；两探针结果不同即直接复现根因 |
 
 同时，**重启循环本身变成 A/B 实验**：连续短命失败时，每次重启自动切换一种启动方式，日志里每次都会打印 `启动策略 N/4`：
 
 | 策略 | 启动方式 | 验证的假设 |
 |---|---|---|
-| 1 | 官方启动器（经 `stdbuf` 强制行缓冲，启动器自己的 `Checking ports` / `Port conflict detected` / `MixlyServer exited before becoming ready` 等进度不再丢失） | 基线；同时补上启动器层的可观测性 |
-| 2 | 直连 `.host/nw`，**不指定 ozone**，让 Chromium 自动探测 X11 | 官方强制的 `--ozone-platform=x11` 是否是窗口创建失败的诱因 |
-| 3 | 直连 `.host/nw`，强制 ozone x11（与官方参数一致）+ Chromium 内部日志 | 与 2 对照，隔离 ozone 因素 |
+| 1 | 直连 `.host/nw`，**不指定 ozone**，让 Chromium 自动探测 X11（**默认**，v2.1.0 实测稳定） | 基线；v2.2.0 起每次重启都从它开始 |
+| 2 | 官方启动器（经 `stdbuf` 强制行缓冲，启动器自己的 `Checking ports` / `Port conflict detected` / `MixlyServer exited before becoming ready` 等进度不再丢失） | 官方路径；同时补上启动器层的可观测性 |
+| 3 | 直连 `.host/nw`，强制 ozone x11（与官方参数一致）+ Chromium 内部日志 | 与 1 对照，隔离 ozone 因素（v2.1.0 已证实这是根因） |
 | 4 | 直连 `.host/nw`，关闭原生窗口遮挡检测（`--disable-features=CalculateNativeWinOcclusion`） | 无窗口管理器环境下，遮挡检测是否干扰窗口生命周期 |
 
-轮换规则：**只有「进程自己短命-0 退出」才推进策略**；`docker stop`、崩溃、超时退出都会把计数重置，下次仍从官方启动器开始。计数文件在挂载卷的 `mixio-app/runtime/boot-attempt` 里，想固定某种方式就手写这个数字（1~4）。
+轮换规则：**只有「进程自己短命-0 退出」才推进策略**；`docker stop`、崩溃、超时退出都会把计数重置，下次仍从默认策略 1 开始。计数文件在挂载卷的 `mixio-app/runtime/boot-attempt` 里，想固定某种方式就手写这个数字（1~4）。
 
 **你要做的只有一件事：把 `自动取证开始` 到 `自动取证结束` 之间的完整日志反馈。**
 
@@ -316,8 +320,9 @@ docker run --rm -e MIXLY_NW_SELFTEST=1 \
   ghcr.io/realkiro/mixly-server:latest
 ```
 
-- `✅ 通过` → 镜像依赖齐备，问题在 MixSuite 应用层 → 用开关 ② 继续
-- `❌ 失败` → NW.js/Chromium 在本容器建不了窗口，属镜像依赖问题 → 把完整日志（含 `xdpyinfo` 输出）反馈，以便补依赖
+- `✅ 通过`（探针 A，无 ozone）→ 镜像依赖齐备，问题在 MixSuite 应用层 → 用开关 ② 继续
+- `❌ 失败`（探针 A）→ NW.js/Chromium 在本容器建不了窗口，属镜像依赖问题 → 把完整日志（含 `xdpyinfo` 输出）反馈，以便补依赖
+- 探针 B（ozone 对照）失败而探针 A 通过 → 即复现 v2.1.0 定位的根因：`--ozone-platform=x11` 在 Xvfb 下导致窗口创建失败（window 0）
 
 **② `MIXLY_DIRECT_NW=1` —— 固定走直连模式，打开 Chromium 内部日志**
 
@@ -332,9 +337,9 @@ docker run -d --name mixly-diag -e MIXLY_DIRECT_NW=1 --restart unless-stopped --
 docker logs mixly-diag 2>&1 | tail -80
 ```
 
-日志里会明确出现窗口为何创建失败（缺 X11 扩展、widget 未初始化等）。找到原因后去掉 `-e MIXLY_DIRECT_NW=1` 即可恢复官方启动器路径。
+日志里会明确出现窗口为何创建失败（缺 X11 扩展、widget 未初始化等）。
 
-> 两个开关都是**诊断用**，不作为默认启动方式：官方启动器承担了环境检查与端口冲突处理，绕过它会失去这些保护（策略轮换中的直连变体同理，仅在连续失败时自动启用）。
+> 两个开关都是**诊断用**。注意 v2.2.0 起默认启动方式本来就是直连 `.host/nw`（无 ozone），`MIXLY_DIRECT_NW=1` 与它的差别只是固定使用官方那套 ozone 参数 + 内部日志，用于复现和对照；想回到官方启动器路径，用策略轮换里的策略 2（把 `mixio-app/runtime/boot-attempt` 手写为 `1`，下次重启即走官方启动器）。
 
 如果升级后仍反复重启，v2.0.6 起 `runtime/nw-main-error.log` 会被自动打印到 `docker logs`，先看它：
 
@@ -371,7 +376,13 @@ v2.1.0 起额外自动完成（窗口层故障场景，**无需手动执行任�
 - 启动时开始 1s 间隔的 8443 端口探针，记录服务首次响应时刻
 - 短命-0 退出时自动执行取证：端口探针结果、`logs` 末 15 行、`nw-main-error.log`、进程与 Xvfb 状态、`xdpyinfo`（X 服务器 visual/扩展）、NW.js 最小窗口自检
 - 经 `stdbuf` 强制行缓冲启动官方启动器，其 `Checking ports` / `Port conflict detected` / `MixlyServer exited before becoming ready` 等进度不再因全缓冲丢失
-- 重启循环自动轮换 4 种启动方式（官方启动器 / 直连无 ozone / 直连 ozone / 直连关闭遮挡检测），计数存于 `mixio-app/runtime/boot-attempt`；`docker stop` 等正常退出自动重置
+- 重启循环自动轮换 4 种启动方式，计数存于 `mixio-app/runtime/boot-attempt`；`docker stop` 等正常退出自动重置
+
+v2.2.0 起（根因已定位后的收尾）：
+
+- **默认启动方式改为直连 `.host/nw` 且不指定 ozone**（Chromium 自动探测 X11）——官方启动器的 `--ozone-platform=x11` 在 Xvfb 下会导致窗口创建失败（window 0 → 约 3 秒退出码 0），这是「只活几秒」故障的根因；v2.1.0 用户日志实测：避开该参数后 MixIO 全服务就绪、容器长期稳定
+- 最小窗口自检改为双探针：探针 A 用默认参数（无 ozone）判定「本容器能否建窗口」，探针 B 补回官方 ozone 参数做对照，两探针结果不同即直接复现根因
+- 策略轮换顺序调整为 1 直连无 ozone（默认）→ 2 官方启动器 → 3 直连强制 ozone → 4 直连关闭遮挡检测；连续失败时才逐级回退，`docker stop` 后重置
 
 > **注意**：`docker run` / `docker compose up` 在本地已存在同名 `latest` tag 时**不会**拉取新镜像。升级必须 `docker pull`（compose 用 `docker compose pull`）后**删除旧容器再启动**，否则跑的仍是旧版——旧版与新版的日志文案不同，可用 `docker logs | grep 已预置` 判断当前到底跑的是哪一版。
 

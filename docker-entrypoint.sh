@@ -462,12 +462,18 @@ NW_COMMON_ARGS="--nwapp=$NW_APP --user-data-dir=$NW_USERDATA --ozone-platform=x1
 # 与 NW_COMMON_ARGS 的差别：默认【不】强制 ozone（让 Chromium 自动探测 X11），
 # 且追加 --enable-logging=stderr，把「窗口句柄为何是 0 / 为何退出」交给
 # Chromium 自己说。策略 3 才补回 ozone 两个开关。
+# 注意（v2.1.0 实测确认）：NW_COMMON_ARGS 里的两个 ozone 开关在 Xvfb 下会
+# 使 Chromium 窗口创建失败（window 0 → 约 3 秒退出码 0），这就是官方启动器
+# 路径在容器里活不下来的根因；NW_DIRECT_BASE 去掉它们后稳定运行。
 NW_DIRECT_BASE="--nwapp=$NW_APP --user-data-dir=$NW_USERDATA --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu --disable-dev-shm-usage --in-process-gpu --enable-logging=stderr"
 
 # ------------------------------------------- NW.js 最小窗口自检（可复用函数）
 # 目的：把「NW.js/Chromium 在本容器能否创建窗口」与「MixSuite 应用层是否有问题」
 # 一刀切开。CI 冒烟测试用桩替换了 MixlyServer，真实 Chromium 从未被验证过，
 # 所以 CI 全绿不等于镜像依赖齐备。
+# v2.2.0 起改为双探针（根因由 v2.1.0 实测定位）：探针 A 用默认策略参数（无
+# ozone）——这才是「本容器能否建窗口」的正确答案；探针 B 补回官方 ozone 参数
+# 做对照，直接把根因差异打出来。
 # 用法：run_nw_selftest <超时秒数>
 # 调用方：
 #   * MIXLY_NW_SELFTEST=1 显式自检（交互式取证）
@@ -503,22 +509,44 @@ HTM
     chmod -R a+rwX "$ST" 2>/dev/null || true
     log "[自检] 正在以最小 NW.js 应用测试窗口创建（约 ${_st_timeout}s 上限）..."
     log "[自检] X 显示: $DISPLAY；Xvfb PID: $XVFB_PID"
+
+    # 探针 A（主探针）：与默认策略一致——【不指定 ozone】，让 Chromium 自动
+    # 探测 X11。v2.1.0 实测：这才是本容器能创建窗口的参数组合。
     _st_rc=0
     ( cd "$ST" && LD_LIBRARY_PATH="$NW_LIB" timeout "$_st_timeout" "$SERVER_DIR/.host/nw" \
+        --nwapp="$ST" --user-data-dir="$SERVER_DIR/user-data" \
+        --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu \
+        --disable-dev-shm-usage --in-process-gpu \
+        --enable-logging=stderr ) || _st_rc=$?
+    if [ -f "$ST/selftest.ok" ]; then
+        log "[自检] ✅ 通过（无 ozone）：NW.js 能在本容器创建窗口并加载页面（退出码 $_st_rc）。"
+        log "[自检] 结论：镜像运行时依赖齐备；若 MixIO 仍异常，问题在应用层或启动参数。"
+    else
+        log "[自检] ❌ 失败（无 ozone）：窗口未创建成功（退出码 $_st_rc）。"
+        log "[自检] 结论：NW.js/Chromium 在本容器建不了窗口，属镜像运行时/环境问题。"
+        log "[自检] 请把本段完整日志（含上面的 stderr）反馈，以便补依赖。"
+    fi
+
+    # 探针 B（ozone 对照）：补回官方启动器默认传的两个开关。
+    # v2.1.0 实测定位的根因：Xvfb 下 --ozone-platform=x11 使 Chromium 窗口
+    # 创建失败（window 0 → 所有窗口关闭 → 退出码 0，约 3 秒）。本探针把
+    # 「有 ozone 建不了 / 无 ozone 能建」的差异直接打出来，避免再靠猜。
+    rm -f "$ST/selftest.ok"
+    _oz_rc=0
+    ( cd "$ST" && LD_LIBRARY_PATH="$NW_LIB" timeout 10 "$SERVER_DIR/.host/nw" \
         --nwapp="$ST" --user-data-dir="$SERVER_DIR/user-data" \
         --ozone-platform=x11 --ozone-platform-hint=x11 --no-sandbox \
         --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu \
         --disable-dev-shm-usage --in-process-gpu \
-        --enable-logging=stderr ) || _st_rc=$?
+        --enable-logging=stderr ) || _oz_rc=$?
     if [ -f "$ST/selftest.ok" ]; then
-        log "[自检] ✅ 通过：NW.js 能在本容器创建窗口并加载页面（退出码 $_st_rc）。"
-        log "[自检] 结论：镜像运行时依赖齐备，问题出在 MixSuite 应用层，"
-        log "[自检]       请用 MIXLY_DIRECT_NW=1 取得 Chromium 内部日志后再定位。"
+        log "[自检] ozone 对照探针：通过（退出码 $_oz_rc）——本环境下 ozone 无害。"
     else
-        log "[自检] ❌ 失败：窗口未创建成功（退出码 $_st_rc）。"
-        log "[自检] 结论：NW.js/Chromium 在本容器建不了窗口，属镜像运行时/环境问题。"
-        log "[自检] 请把本段完整日志（含上面的 stderr）反馈，以便补依赖。"
+        log "[自检] ozone 对照探针：失败（退出码 $_oz_rc）——加上官方 ozone 参数就建不了窗口。"
+        log "[自检]   若探针 A 通过而本探针失败，即复现了 v2.1.0 定位的根因："
+        log "[自检]   --ozone-platform=x11 在 Xvfb 下导致窗口创建失败（window 0）。"
     fi
+
     log "[自检] 关键线索：若上方出现 'XGetWindowAttributes failed' / 'cannot open display'"
     log "[自检] / 'Failed to connect to the bus' 之外的其他错误，即为直接原因。"
     # X 服务器能力证据：窗口建失败时，visual/扩展缺失是最常见的环境根因。
@@ -665,19 +693,25 @@ fi
   log "  docker exec <容器> sh -c 'netstat -lntp | grep -E \"8443|18084\"'" ) &
 
 # ---------------------------------------------------------------- 启动策略
-# 「约 3 秒退出码 0 + 窗口句柄 0」是 NW.js 窗口层故障的签名：mixio.js 已加载成功
-# （nw-main-error.log 为空已证明），故障在 NW 壳/窗口层，不在 MixIO 初始化。
-# 它可能与启动参数/X11 环境有关，但单次运行无法区分。这里把「重启循环」本身
-# 变成 A/B 实验，用户不需要执行任何诊断命令：
+# 根因已定位（v2.1.0 实测确认，2026-10-17 用户日志）：
+#   官方启动器传给 .host/nw 的 --ozone-platform=x11 --ozone-platform-hint=x11
+#   在 Xvfb 下会使 Chromium 连【隐藏窗口】都创建失败（stderr:
+#   XGetWindowAttributes failed for window 0）→ 所有窗口被关闭 →
+#   NW.js 以退出码 0 结束，全程约 3 秒（MixIO 各服务其实已就绪，
+#   8443 探针有响应——死的只是窗口层）。
+#   同一环境、同一运行包，【不指定 ozone】（Chromium 自动探测 X11）时
+#   完全正常：1883/8082-8086/8443/18084 全部监听，容器长期存活。
+# 因此默认策略 = 直连 .host/nw 且不指定 ozone（策略 1）；官方启动器及其余
+# 直连变体保留在轮换里，供环境不同的部署回退：
 #   * 连续短命-0 失败时，每次重启自动切换一种启动方式（共 4 种，轮换）；
-#   * 其它退出（正常停止/崩溃/超时，即非短命-0）重置计数，下次仍从官方启动器开始；
+#   * 其它退出（正常停止/崩溃/超时，即非短命-0）重置计数，下次仍从策略 1 开始；
 #   * 计数文件在挂载卷内（runtime/boot-attempt），跨重启保留；
 #   * 显式设置 MIXLY_NW_SELFTEST / MIXLY_DIRECT_NW 时完全听用户的，不介入。
 # 每次启动都打印所用策略；短命失败时自动执行 auto_forensics 取证。
 ATTEMPT_FILE="$APP_DIR/runtime/boot-attempt"
 PORT_PROBE_STATE="$APP_DIR/runtime/port-probe.state"
 STRATEGY=1
-STRATEGY_DESC="官方启动器（stdbuf 行缓冲，启动器进度可见）"
+STRATEGY_DESC="直连 .host/nw（不指定 ozone，Chromium 自动探测 X11；实测默认）"
 
 # 8443 快速探针（1s 间隔，启动时就开始）：记录 HTTPS 服务首次响应的时刻。
 # 短命退出时它是关键证据——服务到底起没起来过，直接决定排查方向：
@@ -707,8 +741,8 @@ if [ "${MIXLY_NW_SELFTEST:-0}" != "1" ] && [ "${MIXLY_DIRECT_NW:-0}" != "1" ]; t
     STRATEGY=$((_prev + 1))
     [ "$STRATEGY" -gt 4 ] && STRATEGY=1
     case "$STRATEGY" in
-        1) STRATEGY_DESC="官方启动器（stdbuf 行缓冲，启动器进度可见）" ;;
-        2) STRATEGY_DESC="直连 .host/nw（不指定 ozone，Chromium 自动探测 X11）" ;;
+        1) STRATEGY_DESC="直连 .host/nw（不指定 ozone，Chromium 自动探测 X11；实测默认）" ;;
+        2) STRATEGY_DESC="官方启动器 MixlyServer（stdbuf 行缓冲；Xvfb 下 ozone 参数可致 window 0）" ;;
         3) STRATEGY_DESC="直连 .host/nw（强制 ozone x11，与官方启动器参数一致）" ;;
         4) STRATEGY_DESC="直连 .host/nw（关闭原生窗口遮挡检测 CalculateNativeWinOcclusion）" ;;
     esac
@@ -720,22 +754,7 @@ log "启动策略 $STRATEGY/4: $STRATEGY_DESC"
 launch_strategy() {
     cd "$SERVER_DIR"
     case "$STRATEGY" in
-        1)
-            # stdbuf 强制行缓冲：官方启动器的 stdout 在管道下本是全缓冲，
-            # "Checking ports / Starting NW runtime / Loading MixIO service /
-            #  MixlyServer exited before becoming ready" 等关键进度会随缓冲区
-            # 整体丢失，连 "Port conflict detected" 都看不到。LD_PRELOAD 与
-            # _STDBUF_* 环境变量会经 exec 传给 fork 出的 nw 子进程，node 侧
-            # console.log（如 "[INFO] MixIO 服务器正在运行，PID: ..."）也能实时可见。
-            if command -v stdbuf >/dev/null 2>&1; then
-                log "通过 stdbuf -oL -eL 启动官方 MixlyServer（强制行缓冲，启动器进度不再丢失）"
-                stdbuf -oL -eL ./"$BIN_NAME" &
-            else
-                warn "stdbuf 不可用，直接启动官方 MixlyServer（其进度输出可能因全缓冲丢失）"
-                ./"$BIN_NAME" &
-            fi
-            ;;
-        2|3|4)
+        1|3|4)
             _extra=""
             case "$STRATEGY" in
                 3) _extra="--ozone-platform=x11 --ozone-platform-hint=x11" ;;
@@ -745,6 +764,24 @@ launch_strategy() {
             ( export LD_LIBRARY_PATH="$NW_LIB"
               # shellcheck disable=SC2086
               exec "$SERVER_DIR/.host/nw" $NW_DIRECT_BASE $_extra ) &
+            ;;
+        2)
+            # stdbuf 强制行缓冲：官方启动器的 stdout 在管道下本是全缓冲，
+            # "Checking ports / Starting NW runtime / Loading MixIO service /
+            #  MixlyServer exited before becoming ready" 等关键进度会随缓冲区
+            # 整体丢失，连 "Port conflict detected" 都看不到。LD_PRELOAD 与
+            # _STDBUF_* 环境变量会经 exec 传给 fork 出的 nw 子进程，node 侧
+            # console.log（如 "[INFO] MixIO 服务器正在运行，PID: ..."）也能实时可见。
+            # 注意（v2.1.0 实测）：官方启动器传给 nw 的 ozone 两个开关在 Xvfb
+            # 下会导致窗口创建失败（window 0 → 约 3 秒退出码 0），因此它只是
+            # 轮换后备，不是默认方式。
+            if command -v stdbuf >/dev/null 2>&1; then
+                log "通过 stdbuf -oL -eL 启动官方 MixlyServer（强制行缓冲，启动器进度不再丢失）"
+                stdbuf -oL -eL ./"$BIN_NAME" &
+            else
+                warn "stdbuf 不可用，直接启动官方 MixlyServer（其进度输出可能因全缓冲丢失）"
+                ./"$BIN_NAME" &
+            fi
             ;;
     esac
     MIXLY_PID=$!
@@ -821,7 +858,7 @@ if [ "$_rc" = "0" ] && [ "$_uptime" -lt 15 ] && [ "$_STOP_REQUESTED" != "1" ]; t
 fi
 
 # 策略计数：只有「短命-0」推进策略；其它退出（正常停止/崩溃/超时）重置，
-# 下次重启仍从官方启动器开始。
+# 下次重启仍从默认策略（直连无 ozone）开始。
 if [ "$_FAST_FAIL" = "1" ]; then
     :
 else
@@ -849,7 +886,7 @@ case "$_rc" in
              [ "$_next" -gt 4 ] && _next=1
              log "  ▸ 已记录本次失败；下次重启自动切换策略 $_next/4。"
              log "  ▸ 若某种策略下容器持续存活（超过 15s），计数器自动重置，"
-             log "    之后仍从官方启动器开始——不需要你做任何操作。"
+             log "    之后仍从默认策略（直连无 ozone）开始——不需要你做任何操作。"
          else
              log "  ▸ 最常见原因：启动器就绪探测（约 120 次 x 500ms）超时后放弃。"
              log "  ▸ 这几乎总是意味着 MixIO 内部初始化抛错且异常被吞掉。"

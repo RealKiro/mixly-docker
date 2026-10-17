@@ -640,24 +640,32 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t16_fail" ] || fail "T16 $t16_fail"
 ok "T16 最小窗口自检模式可用（一次区分镜像依赖问题与 MixSuite 应用层问题）"
 
-echo "=== T17 短命-0 自动取证 + 启动策略轮换（v2.1.0）==="
-# 背景：「数秒退出码 0 + 窗口句柄 0」是 NW.js 窗口层故障签名，根因无法从单次
-# 运行区分。v2.1.0 起入口脚本把重启循环本身变成 A/B 实验：
+echo "=== T17 短命-0 自动取证 + 启动策略轮换（v2.2.0）==="
+# 背景：「数秒退出码 0 + 窗口句柄 0」是 NW.js 窗口层故障签名。v2.1.0 实测
+# 定位根因：官方启动器传给 .host/nw 的 --ozone-platform=x11 在 Xvfb 下导致
+# 窗口创建失败（window 0 → 所有窗口关闭 → 退出码 0，约 3 秒）；不指定 ozone
+# 时完全正常。v2.2.0 起把实测可用的「直连无 ozone」提为默认策略 1，官方
+# 启动器退居轮换后备：
+#   1 直连无 ozone（默认，实测稳定） → 2 官方启动器 → 3 直连强制 ozone → 4 直连关闭遮挡检测
+# 入口脚本的行为：
 #   * 短命-0 失败时自动执行 auto_forensics（端口探针/日志/错误文件/进程/自检），
 #     用户不需要手动 docker exec；
 #   * 计数文件 runtime/boot-attempt 在挂载卷内跨重启保留，每次重启自动切换
-#     一种启动方式（1 官方启动器 → 2/3/4 直连变体 → 轮换）；
-#   * 非短命-0 退出（如 docker stop）重置计数，下次仍从官方启动器开始。
+#     一种启动方式（轮换 1→2→3→4→1）；
+#   * 非短命-0 退出（如 docker stop）重置计数，下次仍从默认策略 1 开始。
 # 本用例在同一卷上连跑三次验证轮换，再验证 docker stop 后计数重置。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
 t17_fail=""
 
-# 第 1 次：短命-0（桩 sleep 2 后 exit 0）→ 策略 1 + 自动取证
+# 第 1 次：短命-0（桩 sleep 2 后 exit 0）→ 策略 1（直连无 ozone）+ 自动取证
 cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
 wait_log "$cid" "下次重启自动切换策略 2/4" 90 || t17_fail="第 1 次未走完短命-0 全流程（策略推进/自动取证）"
 if [ -z "$t17_fail" ]; then
-    log_has "$cid" "启动策略 1/4" || t17_fail="第 1 次未使用策略 1（官方启动器）"
+    log_has "$cid" "启动策略 1/4" || t17_fail="第 1 次未使用默认策略 1（直连无 ozone）"
+    log_has "$cid" "直连模式" || t17_fail="策略 1 未进入直连模式"
+    # 直连模式必须真的把 .host/nw 拉起来（桩输出 stub-nw-ok）
+    log_has "$cid" "stub-nw-ok" || t17_fail="策略 1 未启动 .host/nw"
     log_has "$cid" "自动取证开始" || t17_fail="自动取证缺少起始标记"
     log_has "$cid" "自动取证结束" || t17_fail="自动取证缺少结束标记"
     # 自动取证必须覆盖端口探针与最小窗口自检两项关键证据
@@ -666,15 +674,13 @@ if [ -z "$t17_fail" ]; then
 fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
 
-# 第 2 次：同一卷 → 策略 2（直连，不指定 ozone）
+# 第 2 次：同一卷 → 策略 2（官方启动器 + stdbuf）
 if [ -z "$t17_fail" ]; then
     cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
     wait_log "$cid" "下次重启自动切换策略 3/4" 90 || t17_fail="第 2 次未切换到策略 2 或未走完全流程（计数器未跨重启保留？）"
     if [ -z "$t17_fail" ]; then
         log_has "$cid" "启动策略 2/4" || t17_fail="第 2 次未使用策略 2"
-        log_has "$cid" "直连模式" || t17_fail="策略 2 未进入直连模式"
-        # 直连模式必须真的把 .host/nw 拉起来（桩输出 stub-nw-ok）
-        log_has "$cid" "stub-nw-ok" || t17_fail="策略 2 未启动 .host/nw"
+        log_has "$cid" "官方 MixlyServer" || t17_fail="策略 2 未回到官方启动器路径"
     fi
     docker rm -f "$cid" >/dev/null 2>&1 || true
 fi
@@ -691,10 +697,10 @@ if [ -z "$t17_fail" ]; then
 fi
 
 # 第 4 次：长命桩 + docker stop → 非短命-0 退出，计数必须重置为 0。
-# 先删计数器模拟「上一次成功运行后的重置状态」，确保本次走官方启动器（策略 1），
-# 否则会接着策略 4（直连）而起，长命桩根本没机会运行。
+# v2.2.0 起默认策略 1 是直连 .host/nw（桩秒退，活不到 18 秒），所以把计数器
+# 预置为 1，让本次走策略 2（官方启动器 + 长命桩）来验证重置与优雅停止。
 if [ -z "$t17_fail" ]; then
-    rm -f "$tmp/mixio-app/runtime/boot-attempt"
+    echo 1 > "$tmp/mixio-app/runtime/boot-attempt"
     cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
     wait_log "$cid" "stub MixlyServer running" 60 || t17_fail="第 4 次桩二进制未被 exec 执行"
     if [ -z "$t17_fail" ]; then
