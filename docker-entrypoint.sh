@@ -259,5 +259,62 @@ export MIXIO_SHELL_DAEMON=1
 export MIXIO_DISABLE_NTP=1
 log "正在启动 MixlyServer（MixIO 服务将在 NW.js 进程内运行）..."
 log "访问入口: https://<本机IP>:8443（HTTPS，自签证书）/ 管理: https://<本机IP>:18084"
+
+# ------------------------------------------- MixIO 日志转发 + 就绪状态播报
+# NW.js 会吞掉 mixio.js 的 console.log，它的真实启动过程只写在
+# mixio-app/logs/*.log 里，而没有这层转发，用户在 docker logs 里只能看到
+# 一片 dbus 噪音，完全看不出服务到底卡在哪一步。这里把日志实时转发到
+# stdout，并在未就绪时定期播报端口状态，让 docker logs 本身即可判定。
+mkdir -p "$APP_DIR/logs"
+# 只在前台身份启动转发：root 分支会 gosu 重跑本脚本，若不加此判断会起两个 tail，
+# 同一份日志被重复输出两遍。
+if [ "$(id -u)" != "0" ]; then
+    if ls "$APP_DIR/logs"/*.log >/dev/null 2>&1; then
+        ( tail -n 0 -F "$APP_DIR/logs"/*.log 2>/dev/null \
+            | sed -u 's/^/[mixio] /' ) &
+        log "已启用 MixIO 日志转发（日志前缀 [mixio]）"
+    else
+        ( # 日志文件稍后才创建：等它出现再开始跟随
+          _waited_log=0
+          while [ "$_waited_log" -lt 120 ]; do
+              sleep 1
+              ls "$APP_DIR/logs"/*.log >/dev/null 2>&1 && break
+              _waited_log=$((_waited_log + 1))
+          done
+          ls "$APP_DIR/logs"/*.log >/dev/null 2>&1 && \
+            tail -n 0 -F "$APP_DIR/logs"/*.log 2>/dev/null | sed -u 's/^/[mixio] /' ) &
+    fi
+fi
+
+# 就绪播报：40s 起每 30s 检查一次 8443，未监听就明确提示（含排查位置）
+( _n=0
+  while [ "$_n" -lt 20 ]; do
+      sleep 30
+      if curl -ksf -o /dev/null --max-time 4 https://127.0.0.1:8443/ 2>/dev/null; then
+          log "就绪检查: 8443 已有 MixIO 在监听，可用 https://<本机IP>:8443 访问"
+          exit 0
+      fi
+      _n=$((_n + 1))
+      [ "$_n" = "1" ] && log "就绪检查: 启动已 40s，8443 仍未监听（首次启动要初始化数据库、拉取证书，请耐心等待）"
+      [ "$_n" -eq 2 ] && log "就绪检查: 80s 仍未监听；若日志无 [mixio] 输出说明日志目录未生成，见 README FAQ Q10"
+  done
+  log "就绪检查: 10 分钟内 8443 始终未监听，请执行 docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/logs/*.log' 获取 MixIO 日志" ) &
+
 cd "$SERVER_DIR"
-exec "./$BIN_NAME"
+# 这里刻意【不用 exec】：保留退出码并转发信号。MixlyServer 静默退出是当前最需要
+# 诊断的场景（容器 running→进程没了→重启策略拉起，日志里看不到任何原因），
+# 退出码是判断崩溃类型的第一手证据：139=段错误 134=abort 143=正常停止。
+trap 'kill -TERM "$MIXLY_PID" 2>/dev/null || true' TERM INT
+./"$BIN_NAME" &
+MIXLY_PID=$!
+wait "$MIXLY_PID"
+_rc=$?
+log "MixlyServer 进程已退出，退出码: $_rc"
+case "$_rc" in
+    0)   log "退出码 0：应用主动退出（若非预期，请检查是否被 mixio-app/config 里的自动更新触发）" ;;
+    139) log "退出码 139 = SIGSEGV（段错误崩溃）。常见原因：NW.js/Chromium 在无显示环境下崩溃；可尝试给容器加 --shm-size=1g" ;;
+    134) log "退出码 134 = SIGABRT（断言失败/abort 崩溃）。建议查看上方 [mixio] 日志的最后几行" ;;
+    143) log "退出码 143 = SIGTERM（收到停止信号，正常退出）" ;;
+    *)   log "退出码 $_rc 属非预期退出，容器会被重启策略拉起；请把上方日志连同本行一起反馈" ;;
+esac
+exit "$_rc"

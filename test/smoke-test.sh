@@ -27,11 +27,23 @@ make_pkg() {
         printf '\xb7\x00' | dd of="$dir/.host/nw" bs=1 seek=18 conv=notrunc status=none
     fi
     # MixlyServer 桩：打印标记后前台常驻（MixSuite 版 MixlyServer 前台运行、不 daemon 化），
-    # 捕获 TERM/INT 模拟官方应用的优雅退出
+    # 捕获 TERM/INT 模拟官方应用的优雅退出。
+    # 同时模拟 MixIO 的真实可观测性：NW.js 会吞掉它的 console.log，真实日志写在
+    # mixio-app/logs/*.log 里——入口脚本必须把它转发到 stdout。
+    # MIXLY_STUB_EXIT=N 时启动 N 秒后以该码退出，用于验证退出码捕获链路。
     cat > "$dir/MixlyServer" <<'STUB'
 #!/bin/sh
 echo "[INFO] stub MixlyServer running (foreground)"
+LOG="$PWD/mixio-app/logs/stub-mixio.log"
+mkdir -p "$PWD/mixio-app/logs"
+sleep 1   # 给入口脚本的 tail 转发留出启动时间（tail -n 0 只跟随后续写入）
+echo "[INFO] MixIO 服务器已成功启动。 / MixIO server is running now." >> "$LOG"
 trap 'echo "[INFO] stub received stop signal, exiting"; exit 0' TERM INT
+if [ -n "${MIXLY_STUB_EXIT:-}" ]; then
+    sleep 2
+    echo "[INFO] stub simulating crash, exit $MIXLY_STUB_EXIT" >> "$LOG"
+    exit "$MIXLY_STUB_EXIT"
+fi
 while :; do sleep 5 & wait $!; done
 STUB
     echo '{}' > "$dir/mixio-app/package.json"
@@ -201,4 +213,30 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t5_fail" ] || fail "T5 $t5_fail"
 ok "T5 前台运行容器保持存活，docker stop 优雅退服"
 
-echo "🎉 冒烟测试全部通过: $PASS/5"
+echo "=== T6 MixIO 日志转发 + 崩溃退出码捕获 ==="
+# 场景：NW 壳静默崩溃 → 容器被重启策略拉起 → 没有 exec 就拿不到退出码，
+# 而 MixIO 的日志只在文件里，用户在 docker logs 里什么都看不到。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cid=$(docker run -d -e MIXLY_STUB_EXIT=42 -v "$tmp:/opt/mixly_server" "$IMAGE")
+t6_fail=""
+wait_log "$cid" "退出码: 42" 60 || t6_fail="未捕获子进程退出码 42（入口脚本可能仍用 exec 启动）"
+if [ -z "$t6_fail" ]; then
+    # 退出后 docker logs 仍可读，日志转发应在崩溃前就已输出
+    docker logs "$cid" 2>&1 | grep -q "\[mixio\] MixIO 服务器已成功启动" \
+        || t6_fail="MixIO 日志未转发到 stdout（缺少 [mixio] 前缀行）"
+fi
+if [ -z "$t6_fail" ]; then
+    docker logs "$cid" 2>&1 | grep -q "已启用 MixIO 日志转发" \
+        || t6_fail="入口脚本未声明启用日志转发"
+fi
+if [ -n "$t6_fail" ]; then
+    echo "----- 容器日志（末 30 行）-----"
+    docker logs "$cid" 2>&1 | tail -30 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t6_fail" ] || fail "T6 $t6_fail"
+ok "T6 MixIO 日志转发到 stdout，崩溃退出码 42 被捕获并解读"
+
+echo "🎉 冒烟测试全部通过: $PASS/6"
