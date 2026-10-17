@@ -52,11 +52,28 @@ STUB
     chmod +x "$dir/MixlyServer" "$dir/.host/nw"
 }
 
+# 判断容器日志是否包含指定内容（ERE）。
+#
+# 千万不要写成 `docker logs "$cid" 2>&1 | grep -q "$pat"`：本脚本开头有
+# set -o pipefail，而 grep -q 一旦命中就立刻退出，此时 docker logs 仍在
+# 往管道写，就会收到 SIGPIPE（退出码 141）；pipefail 把 141 当作整条管道
+# 失败，于是「日志里明明有这行」却判成没有 —— 实测 T7 就这样假失败过
+# （匹配串在日志中段；在末段时 grep 读完全部才退出，反而不会触发，
+# 所以同一个 bug 会随日志长短随机出现，极难复现）。
+#
+# 这里先把日志整体读进变量再用 bash 内置正则匹配：没有管道、没有子进程
+# 提前退出，彻底消除这一类竞态。
+log_has() { # $1=cid $2=ERE
+    local _l
+    _l=$(docker logs "$1" 2>&1 || true)
+    [[ $_l =~ $2 ]]
+}
+
 # 等待容器日志出现指定内容（轮询，避免固定 sleep 拖慢/抖动）
 wait_log() { # $1=cid $2=pattern $3=timeout_seconds
     local cid="$1" pat="$2" timeout="$3" i=0
     while [ "$i" -lt "$timeout" ]; do
-        docker logs "$cid" 2>&1 | grep -q "$pat" && return 0
+        log_has "$cid" "$pat" && return 0
         sleep 1; i=$((i + 1))
     done
     return 1
@@ -76,12 +93,13 @@ cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
 t2_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t2_fail="桩二进制未被 exec 执行"
 if [ -z "$t2_fail" ]; then
-    c_logs=$(docker logs "$cid" 2>&1)
-    echo "$c_logs" | grep -q "运行包架构校验通过" || t2_fail="架构校验未通过"
-    echo "$c_logs" | grep -q "Xvfb 虚拟显示已就绪" || t2_fail="Xvfb 未就绪"
+    # 统一走 log_has：`echo "$c_logs" | grep -q` 与 `docker logs | grep -q`
+    # 是同一条 pipefail+SIGPIPE 链路（echo 量小时不易触发，但仍是隐患）
+    log_has "$cid" "运行包架构校验通过" || t2_fail="架构校验未通过"
+    log_has "$cid" "Xvfb 虚拟显示已就绪" || t2_fail="Xvfb 未就绪"
     # CI 的 /dev/shm 是 Docker 默认 64MB，正好覆盖"共享内存不足"这条告警路径：
     # 该检测缺失会导致 NW.js 在用户机器上静默重启而无任何提示。
-    echo "$c_logs" | grep -q "/dev/shm 仅" \
+    log_has "$cid" "/dev/shm 仅" \
         || t2_fail="未检出 /dev/shm 共享内存不足（CI 默认 64MB，应打出警告）"
 fi
 if [ -z "$t2_fail" ]; then
@@ -153,7 +171,9 @@ if [ -z "$t2b_fail" ] && [ ! -d "$tmp/.cache" ]; then
     t2b_fail="未预建套件根下的 .cache（fontconfig 缓存目录，Chromium 会报 No writable cache directories）"
 fi
 if [ -z "$t2b_fail" ]; then
-    docker logs "$cid" 2>&1 | grep -q "无法写入.*user-data" \
+    # 期望【不】出现：grep 不命中时会读完全部输入，不会触发 SIGPIPE，
+    # 但为一致性与可读性仍统一走 log_has
+    log_has "$cid" "无法写入.*user-data" \
         && t2b_fail="入口脚本的写入自检未通过"
 fi
 if [ -n "$t2b_fail" ]; then
@@ -205,7 +225,7 @@ sleep 8
 [ "$(docker inspect -f '{{.State.Running}}' "$cid")" = "true" ] || t5_fail="前台运行中容器不应自行停止"
 docker stop -t 15 "$cid" >/dev/null 2>&1 || true
 if [ -z "$t5_fail" ]; then
-    docker logs "$cid" 2>&1 | grep -q "stub received stop signal" || t5_fail="停止时未走优雅退服"
+    log_has "$cid" "stub received stop signal" || t5_fail="停止时未走优雅退服"
 fi
 if [ -n "$t5_fail" ]; then
     echo "----- 容器日志（末 30 行）-----"
@@ -228,11 +248,11 @@ wait_log "$cid" "退出码: 42" 60 || t6_fail="未捕获子进程退出码 42（
 if [ -z "$t6_fail" ]; then
     # 用崩溃前最后一条日志做断言：tail -n 0 从文件末尾开始跟，桩启动瞬间写的
     # 那几行可能落在 tail 就绪之前，只有稍后追加的行一定会被转发出来。
-    docker logs "$cid" 2>&1 | grep -q "\[mixio\].*stub simulating crash" \
+    log_has "$cid" "\[mixio\].*stub simulating crash" \
         || t6_fail="MixIO 日志未转发到 stdout（缺少 [mixio] 前缀行）"
 fi
 if [ -z "$t6_fail" ]; then
-    docker logs "$cid" 2>&1 | grep -q "已启用 MixIO 日志转发" \
+    log_has "$cid" "已启用 MixIO 日志转发" \
         || t6_fail="入口脚本未声明启用日志转发"
 fi
 if [ -n "$t6_fail" ]; then
@@ -267,7 +287,10 @@ if [ -z "$t7_fail" ]; then
         || t7_fail="预置的 filter.json 不是合法 JSON 对象"
 fi
 if [ -z "$t7_fail" ]; then
-    docker logs "$cid" 2>&1 | grep -q "已预置 storage/reserve/filter.json" \
+    # 注意：必须用 log_has 而不是 `docker logs | grep -q`。
+    # 本脚本有 set -o pipefail，grep -q 命中即退出会让 docker logs 收到
+    # SIGPIPE(141)，管道状态变为 141，这里就会假失败（实测发生过）。
+    log_has "$cid" "已预置 storage/reserve/filter.json" \
         || t7_fail="入口脚本未声明预置 filter.json"
 fi
 if [ -z "$t7_fail" ]; then
@@ -315,11 +338,11 @@ t8_fail=""
 wait_log "$cid" "MixIO 加载失败" 60 \
     || t8_fail="未捕获 runtime/nw-main-error.log（MixIO 加载失败时docker logs 无任何线索）"
 if [ -z "$t8_fail" ]; then
-    docker logs "$cid" 2>&1 | grep -q "Cannot find module 'node:sqlite'" \
+    log_has "$cid" "Cannot find module 'node:sqlite'" \
         || t8_fail="错误详情未完整打印到容器日志"
 fi
 if [ -z "$t8_fail" ]; then
-    docker logs "$cid" 2>&1 | grep -q "node:sqlite" \
+    log_has "$cid" "node:sqlite" \
         || t8_fail="未提示 node:sqlite 兼容性这一常见原因"
 fi
 if [ -n "$t8_fail" ]; then
@@ -340,10 +363,10 @@ cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t9_fail=""
 wait_log "$cid" "退出码: 0" 60 || t9_fail="未捕获退出码 0"
 if [ -z "$t9_fail" ]; then
-    logs=$(docker logs "$cid" 2>&1)
-    echo "$logs" | grep -q "就绪探测" \
+    # 同样必须用 log_has：`echo "$logs" | grep -q` 也是同一条 pipefail+SIGPIPE 链路
+    log_has "$cid" "就绪探测" \
         || t9_fail="未说明退出码 0 实为就绪探测超时"
-    echo "$logs" | grep -q "nw-main-error.log" \
+    log_has "$cid" "nw-main-error.log" \
         || t9_fail="未给出取证命令（nw-main-error.log）"
 fi
 if [ -n "$t9_fail" ]; then
@@ -430,12 +453,11 @@ cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
 t11_fail=""
 wait_log "$cid" "MixIO 加载失败" 60 || t11_fail="未捕获 runtime/nw-main-error.log"
 if [ -z "$t11_fail" ]; then
-    logs=$(docker logs "$cid" 2>&1)
-    echo "$logs" | grep -q "EACCES: permission denied, mkdir" \
+    log_has "$cid" "EACCES: permission denied, mkdir" \
         || t11_fail="错误详情未完整打印"
-    echo "$logs" | grep -q "文件权限" \
+    log_has "$cid" "文件权限" \
         || t11_fail="未识别为文件权限类错误（会把用户误导到 node:sqlite）"
-    echo "$logs" | grep -q "chmod -R a+rwX" \
+    log_has "$cid" "chmod -R a\+rwX" \
         || t11_fail="未给出 chmod 修复命令"
 fi
 if [ -n "$t11_fail" ]; then
@@ -459,8 +481,8 @@ cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
 t12_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t12_fail="桩二进制未被 exec 执行"
 if [ -z "$t12_fail" ]; then
-    # 陈旧错误不得作为「本次加载失败」被打印
-    if docker logs "$cid" 2>&1 | grep -q "STALE-ERROR-FROM-PREVIOUS-RUN"; then
+    # 陈旧错误不得作为「本次加载失败」被打印（期望【不】命中）
+    if log_has "$cid" "STALE-ERROR-FROM-PREVIOUS-RUN"; then
         t12_fail="上一次的陈旧错误被当成新错误重复打印（会误导排查方向）"
     fi
 fi

@@ -212,6 +212,11 @@ if [ "$(id -u)" = "0" ]; then
     chmod -R a+rwX "$RESERVE_DIR"
     if [ ! -f "$RESERVE_DIR/filter.json" ]; then
         if printf '{}' > "$RESERVE_DIR/filter.json" 2>/dev/null; then
+            # 这个文件由 root 创建（默认 umask 022 → 644）。若 chown 在
+            # virtiofs/NFS 上静默失败，属主仍是 root，而官方后续要往里写
+            # userName -> bool，mixly 写不进去就会在运行时才炸。
+            # 权限位兜底：补成所有用户可读写。
+            chmod a+rw "$RESERVE_DIR/filter.json" 2>/dev/null || true
             log "已预置 storage/reserve/filter.json（缺失会让 mixio.js:6756 抛错并静默挂死）"
         else
             warn "预置 filter.json 失败；若服务反复重启请检查 $RESERVE_DIR 是否可写"
@@ -220,6 +225,10 @@ if [ "$(id -u)" = "0" ]; then
         # 官方会往里写 userName->bool，必须是合法 JSON，否则同样炸在 6756
         warn "filter.json 内容不是合法 JSON（mixio.js:6756 会抛错），已重置为 {}"
         printf '{}' > "$RESERVE_DIR/filter.json" 2>/dev/null || true
+        chmod a+rw "$RESERVE_DIR/filter.json" 2>/dev/null || true
+    else
+        # 已存在且合法：同样补一次权限位（可能是上一次以 root 身份写的）
+        chmod a+rw "$RESERVE_DIR/filter.json" 2>/dev/null || true
     fi
 
     # zip 解压后常丢失执行位；firstrun.sh 亦要求对这三个文件 chmod +x
