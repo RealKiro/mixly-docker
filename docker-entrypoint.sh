@@ -132,6 +132,13 @@ if [ "$(id -u)" = "0" ]; then
     # 表现为「宿主机看不到容器里明明已创建的目录」。
     MIXLY_UID=$(id -u mixly)
     log "root: 开始准备数据目录（套件根=$SERVER_DIR, mixly uid=$MIXLY_UID）"
+
+    # 保证降权后的 mixly 用户能进入套件根目录：mktemp 或严格 umask 解压出来的
+    # 根目录可能是 700（属主是宿主机用户），root 能进但 mixly 不能。若不先补权限，
+    # 下面「mixly 写入自检」会因无法穿越根目录而误报 EACCES。
+    # 只追加「其他用户可读+可进入」，属主不变，不影响宿主机用户的管理权限。
+    chmod o+rx "$SERVER_DIR" 2>/dev/null || true
+
     for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
               "$APP_DIR/runtime" "$SERVER_DIR/user-data"; do
         mkdir -p "$_d"
@@ -188,12 +195,6 @@ if [ "$(id -u)" = "0" ]; then
         exit 1
     fi
     rm -f "$SERVER_DIR/user-data/.entrypoint-write-test" 2>/dev/null || true
-
-    # 保证降权后的 mixly 用户能进入套件根目录：mktemp 或严格 umask 解压出来的
-    # 根目录可能是 700（属主是宿主机用户），root 能进但 mixly 不能，二次执行时
-    # 连运行包都检测不到（报"未检测到 Mixly 官方运行包"后退出）。
-    # 只追加「其他用户可读+可进入」，属主不变，不影响宿主机用户的管理权限。
-    chmod o+rx "$SERVER_DIR" 2>/dev/null || true
 
     exec gosu mixly:mixly "$0" "$@"
 fi
