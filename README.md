@@ -61,6 +61,11 @@
 
 3. Container Manager → 项目 → 新增 → 选择该 compose 文件 → 启动。
 
+> 内存与共享内存：NW.js 是完整 Chromium，Docker 默认 `/dev/shm` 只有 64MB，
+> 不足会让渲染进程静默退出（容器每隔一两分钟自己重启、日志里看不到原因）。
+> 本仓库的 compose 已内置 `shm_size: '1gb'`；若你用 `docker run` 请务必加
+> `--shm-size=1g`，并给容器留 1.5GB 以上内存（群晖：容器设置 → 内存限制）。
+
 ### 6️⃣ 访问
 
 | 入口 | 地址 | 说明 |
@@ -201,6 +206,8 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 | `Downloading certificate from https://mixly.org/...` 后卡住 / 反复 handshake 失败 | 离线内网拉不到官方证书（每个 5 秒超时，共两次） | 等 10~30 秒；急用可断开启动时的外网请求，或在 `mixio-app/config/config.json` 把 `HTTPS_CRT_FILE`/`HTTPS_PRIVATE_PEM` 指向本地证书文件（不填 http:// 开头即走本地路径） |
 | 无日志、`logs/` 为空 | MixIO 还没进入初始化 | 先确认第 1 步不是 `starting`，再看第 3 步端口 |
 | `EADDRINUSE` / 端口被占 | 同容器内端口冲突或旧进程残留 | `docker exec <容器名> sh -c 'cat /opt/mixly_server/mixio-app/pid.info'` 看 PID 是否存在；容器重建即可清干净 |
+| 容器每隔 1~2 分钟静默重启一次，日志无任何报错（连 `[mixio]` 都没有） | **`/dev/shm` 太小导致 Chromium 渲染进程崩溃**（Docker 默认仅 64MB） | 用 `docker run` 时加 `--shm-size=1g`；compose 用 `shm_size: '1gb'`；同时给容器留 1.5GB+ 内存 |
+| 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | 同上；这条警告出现时静默重启基本可确定是它 |
 
 ## 致谢与声明
 

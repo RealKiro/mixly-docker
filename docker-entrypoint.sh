@@ -225,6 +225,15 @@ chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" 2>/dev/null || true
 # NW.js 需要 X11 才能建窗口；服务端部署用 Xvfb 兜底。浏览器访问不依赖它。
 DISPLAY_NUM="${MIXLY_DISPLAY_NUM:-99}"
 export DISPLAY=":${DISPLAY_NUM}"
+
+# Chromium 共享内存检查：/dev/shm 默认仅 64MB，NW.js 渲染进程在空间不足时会
+# 异常退出，且不产生任何应用层日志——表现就是容器每隔一两分钟静默重启一次
+# （退出码 137/139）。这里主动检测并给出明确修复方式。
+_shm_kb=$(df -k /dev/shm 2>/dev/null | awk 'NR==2 {print $2}')
+if [ -n "$_shm_kb" ] && [ "$_shm_kb" -lt 262144 ] 2>/dev/null; then
+    log "警告: /dev/shm 仅 $((_shm_kb / 1024))MB（需≥256MB），Chromium 渲染进程可能异常退出"
+    log "警告: 请加 --shm-size=1g 启动容器（compose 用 shm_size: '1gb'），否则可能出现静默重启"
+fi
 # 同一容器重启后 PID 命名空间是全新的，上一次的 X socket/lock 已是残留
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 

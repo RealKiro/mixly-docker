@@ -19,6 +19,10 @@ services:
     image: ghcr.io/realkiro/mixly-server:latest   # 多架构镜像，按 NAS 架构自动选择
     container_name: mixly-server
     restart: unless-stopped
+    # NW.js 是完整 Chromium，共享内存不足会导致渲染进程异常退出
+    # （容器反复重启、日志无应用层报错）。Docker 默认 /dev/shm 仅 64MB，
+    # 这里放大到 1GB。docker run 等价写法：--shm-size=1g
+    shm_size: '1gb'
     environment:
       - TZ=Asia/Shanghai
       # 可选：端口覆盖（不设置则用官方默认 8443/1883/8083/8084/8082/8086。

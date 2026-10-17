@@ -79,6 +79,10 @@ if [ -z "$t2_fail" ]; then
     c_logs=$(docker logs "$cid" 2>&1)
     echo "$c_logs" | grep -q "运行包架构校验通过" || t2_fail="架构校验未通过"
     echo "$c_logs" | grep -q "Xvfb 虚拟显示已就绪" || t2_fail="Xvfb 未就绪"
+    # CI 的 /dev/shm 是 Docker 默认 64MB，正好覆盖"共享内存不足"这条告警路径：
+    # 该检测缺失会导致 NW.js 在用户机器上静默重启而无任何提示。
+    echo "$c_logs" | grep -q "/dev/shm 仅" \
+        || t2_fail="未检出 /dev/shm 共享内存不足（CI 默认 64MB，应打出警告）"
 fi
 if [ -z "$t2_fail" ]; then
     # 回归检查：宿主机必须仍能访问挂载源。入口脚本若 chown 挂载根目录
