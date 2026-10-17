@@ -1,11 +1,19 @@
-# Mixly 离线服务端 - 群晖 NAS Docker Compose 部署
-# 镜像只含运行环境；官方运行包需自行放入下方映射的 mixly_server 目录。
+# Mixly 4.0（MixSuite）离线服务端 - 群晖 NAS Docker Compose 部署
+# 镜像只含运行环境（Debian + NW.js/X11 依赖 + Xvfb，约 300MB）；
+# 官方 MixSuite 运行包需按机器架构下载解压后放入下方映射的 mixly_server 目录。
+#
+# Mixly 4.0 起官方唯一发行版 = MixSuite（内置 MixIO 的 MixlyServer，NW.js 应用）：
+#   * 强制 HTTPS：HTTP(8080) 被官方固定关闭，请用 https://NAS_IP:8443 访问
+#     （运行包自带自签证书，浏览器提示"连接不是专用连接"时点 高级→继续访问）
+#   * 数据在映射目录的 mixio-app/ 下：storage(SQLite) / logs / config
+#   * 管理员默认 admin/public，在 mixio-app/config/config.json 中修改
 #
 # 首次运行三步：
 #   1. 建目录 /docker/mixly/mixly_server
-#   2. 从官方百度网盘下载 mixly_server 压缩包，解压后把内容（mixio/ mixly/ mixco/）
+#   2. 按机器架构从官方百度网盘下载 MixSuite-linux-<x64|arm64|loong64>.zip，
+#      解压后把【里面的全部内容】（MixlyServer、.host/、mixio-app/、mixly/ 等）
 #      放进上面目录
-#   3. Container Manager 导入本文件并启动；之后浏览器访问 http://NAS_IP:8080
+#   3. Container Manager 导入本文件并启动；之后浏览器访问 https://NAS_IP:8443
 services:
   mixly:
     image: ghcr.io/realkiro/mixly-server:latest   # 多架构镜像，按 NAS 架构自动选择
@@ -13,16 +21,35 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      # 可选：端口覆盖（不设置则用官方默认 8443/1883/8083/8084/8082/8086。
+      #        HTTP 端口被官方强制为 0，无法开启；改 HTTPS 为 443 需配合
+      #       下方 cap_add: NET_BIND_SERVICE）
+      # - MIXIO_HTTPS_PORT=8443
+      # - MIXIO_MQTT_PORT=1883
+      # - MIXIO_WS_PORT=8083
+      # - MIXIO_WSS_PORT=8084
+      # - MIXIO_YJS_PORT=8082
+      # - MIXIO_YJS_WSS_PORT=8086
+      # - MIXIO_DISABLE_NTP=1      # 不需要 NTP(123) 仿真时可禁用
     ports:
-      - "8080:8080"     # MixIO HTTP（官方默认端口）
-      - "8443:8443"     # MixIO HTTPS 主页面
-      - "18084:18084"   # 管理模式（数据管理/用户导入/手动更新，默认 admin/public）
+      - "8443:8443"     # MixIO HTTPS 主入口（MixSuite 强制 HTTPS）
+      - "18084:18084"   # 管理模式（数据管理/用户导入/在线更新，默认 admin/public）
       - "1883:1883"     # MQTT
       - "8083:8083"     # WebSocket MQTT
       - "8084:8084"     # WSS MQTT
       - "8082:8082"     # Yjs 协同
       - "8086:8086"     # Yjs WSS
-      # - "443:443"     # 如需直连 443 再放开（群晖自身常占用 443）
+      # - "443:443"       # 配合 MIXIO_HTTPS_PORT=443 使用（需 cap_add）
+      # - "123:123/udp"   # NTP 仿真（需 cap_add: NET_BIND_SERVICE）
+    # 绑定 443/123 等特权端口时取消注释（容器内以非 root 运行，默认无需）：
+    # cap_add:
+    #   - NET_BIND_SERVICE
+    # 烧录硬件（串口）时按需透传 USB 设备，并加入 dialout 组获得串口权限：
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    # group_add:
+    #   - dialout
     volumes:
-      # 官方运行包 + 全部数据（storage/store/logs/config）都在这里，升级镜像不丢数据
+      # 官方 MixSuite 运行包 + 全部数据（mixio-app/storage、logs、config、
+      # user-data）都在这里，升级镜像不丢数据
       - ./mixly_server:/opt/mixly_server

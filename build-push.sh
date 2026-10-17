@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 本地构建并推送“运行环境镜像”到 GHCR 与 Docker Hub
-# 因 Docker Hub 官方 alpine 无 loong64 变体，按架构分别构建
-# （loong64 用社区镜像 ghcr.io/loong64/alpine:3），再合并多架构 manifest
+# MixSuite(MixlyServer) 是 NW.js 应用：glibc 动态链接 + 需要 X11，
+# 基础镜像用 debian:trixie-slim（含 Xvfb 与 NW.js 依赖）。
+# Docker Hub 官方 debian 无 loong64 变体，loong64 腿用社区同步镜像
+# ghcr.io/loong64/debian:trixie-slim，按架构分别构建后合并多架构 manifest。
 # 前置：docker login ghcr.io 与 docker login 已完成
 set -euo pipefail
 
@@ -35,9 +37,9 @@ push_manifest() { # $1=镜像名
     docker manifest push "${1}:${TAG}"
 }
 
-build_arch amd64  "linux/amd64"  "alpine:3"
-build_arch arm64  "linux/arm64"  "alpine:3"
-build_arch loong64 "linux/loong64" "ghcr.io/loong64/alpine:3"
+build_arch amd64  "linux/amd64"  "debian:trixie-slim"
+build_arch arm64  "linux/arm64"  "debian:trixie-slim"
+build_arch loong64 "linux/loong64" "ghcr.io/loong64/debian:trixie-slim"
 
 push_manifest "$GHCR_IMAGE"
 [ "$PUSH_DH" = 1 ] && push_manifest "$DH_IMAGE"

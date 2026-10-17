@@ -1,8 +1,9 @@
 # CI 流水线：测试 -> 跨架构构建检查 -> 按架构构建推送 -> manifest 合并
 # - PR / 推送 main：仅跑冒烟测试 + arm64/loong64 构建检查（不推送）
 # - 推送 v* 标签 / 手动触发：测试全部通过后按架构分别构建并推送，
-#   再合并为多架构 manifest（Docker Hub 官方 alpine 无 loong64，
-#   loong64 腿使用社区镜像 ghcr.io/loong64/alpine，见 Dockerfile BASE_IMAGE）
+#   再合并为多架构 manifest（MixSuite 为 NW.js 应用，基础镜像用
+#   debian:trixie-slim；Docker Hub 官方 debian 无 loong64 变体，loong64
+#   腿使用社区同步镜像 ghcr.io/loong64/debian:trixie-slim，见 Dockerfile BASE_IMAGE）
 # - GHCR 用自带 GITHUB_TOKEN；Docker Hub 需配置 DOCKERHUB_USERNAME/
 #   DOCKERHUB_TOKEN（secrets 不能用于 if 表达式，先映射到 env 再判断）
 name: docker-ci
@@ -42,7 +43,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: 运行冒烟测试（缺包指引 / 架构校验 / 非 root 启动链路 / 镜像元数据）
+      - name: 运行冒烟测试（缺包指引 / 架构校验 / Xvfb+启动链路 / 镜像元数据）
         run: bash test/smoke-test.sh mixly-server:test
 
   cross-build:
@@ -54,10 +55,10 @@ jobs:
         include:
           - pair: arm64
             platform: linux/arm64
-            base: alpine:3
+            base: debian:trixie-slim
           - pair: loong64
             platform: linux/loong64
-            base: ghcr.io/loong64/alpine:3
+            base: ghcr.io/loong64/debian:trixie-slim
     steps:
       - uses: actions/checkout@v4
 
@@ -90,13 +91,13 @@ jobs:
         include:
           - pair: amd64
             platform: linux/amd64
-            base: alpine:3
+            base: debian:trixie-slim
           - pair: arm64
             platform: linux/arm64
-            base: alpine:3
+            base: debian:trixie-slim
           - pair: loong64
             platform: linux/loong64
-            base: ghcr.io/loong64/alpine:3
+            base: ghcr.io/loong64/debian:trixie-slim
     steps:
       - uses: actions/checkout@v4
 

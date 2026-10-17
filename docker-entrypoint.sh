@@ -1,39 +1,53 @@
 #!/bin/sh
-# Mixly 服务端容器入口：检测官方运行包 -> 校验架构匹配 -> 修正权限 -> 以非 root 后台启动 -> 守护并转发停止信号
-# 官方运行包按机器架构提供（x64 / arm64 / loong64，启动文件同名 mixio），
-# 本脚本会在启动前校验运行包架构与机器是否一致，避免用户下错压缩包。
-# 注意：mixio 会自我 daemon 化（父进程退出），故不能用 exec 直接启动，见文件末尾说明。
+# Mixly 4.0（MixSuite）服务端容器入口：
+#   定位官方运行包 -> 校验架构匹配 -> (root) 预建/降权数据目录 -> 起 Xvfb -> exec MixlyServer
+#
+# MixSuite 包结构（Mixly 4.0 起官方唯一发行版，替代旧版 mixly_server）：
+#   <映射目录>/MixlyServer          启动器（ELF；按环境变量写 config 后 exec .host/nw）
+#   <映射目录>/.host/nw              NW.js 加载器（ELF；dlopen .host/lib/libnw.so）
+#   <映射目录>/mixio-app/            NW 应用：nw-main.js 同进程 require mixio.js = MixIO 服务
+#                                     config/ 配置与证书  storage/ SQLite  logs/ 日志  runtime/
+#   <映射目录>/mixly/                Mixly 编辑器静态资源（建议保留，缺失仅编辑器不可用）
+#   <映射目录>/mixco/ mixmo/         课程 / MixMO 静态资源（可选，因包而异）
+#
+# 运行方式与旧版 mixio 的区别：MixlyServer 前台运行、不 daemon 化，
+# 自行处理 SIGTERM/SIGINT 做优雅退出，因此这里直接 exec，无需守护循环。
 set -e
 
-SERVER_DIR="/opt/mixly_server"
-MIXIO_DIR="$SERVER_DIR/mixio"
-BIN="$MIXIO_DIR/mixio"
+SERVER_DIR="${MIXLY_SERVER_DIR:-/opt/mixly_server}"
+BIN_NAME="MixlyServer"
+
+log()  { echo "[entrypoint] $*"; }
+warn() { echo "[entrypoint][WARN] $*" >&2; }
 
 missing_package() {
     cat >&2 <<'EOF'
 ==========================================================================
- [!] 未检测到 Mixly 官方运行包，容器无法启动。
+ [!] 未检测到 Mixly 官方运行包（MixSuite），容器无法启动。
 
- 请按以下步骤放置运行包（首次运行 / 升级包缺失时）：
+ Mixly 4.0 起官方只有一个发行版：内置 MixIO 的 MixSuite。
+ 请按你的机器架构下载对应压缩包（x64 / arm64 / loong64，不清楚可咨询主机厂家）：
 
-   1. 按你的机器架构（x64 / arm64 / loong64，不清楚可咨询主机厂家）
-      从官方百度网盘下载对应的 mixly_server 压缩包
-   2. 解压后得到 mixly_server 文件夹（内含 mixio/ mixly/ mixco/ 三个目录）
-   3. 将 mixly_server 文件夹内的【全部内容】放入容器的映射路径，例如：
+   MixSuite-linux-x64.zip      → Intel/AMD 群晖、PC
+   MixSuite-linux-arm64.zip    → ARM 群晖、国产新创电脑
+   MixSuite-linux-loong64.zip  → 龙芯电脑
 
-        群晖:    /docker/mixly/mixly_server/    （对应 compose 中的 ./mixly_server）
+ 放置步骤：
+   1. 解压得到 MixSuite-linux-<架构>/ 目录
+   2. 把该目录【里面的全部内容】放进容器的映射路径，例如：
+
+        群晖:    /docker/mixly/mixly_server/   （对应 compose 中的 ./mixly_server）
         命令行:  docker run 时 -v /你的路径/mixly_server:/opt/mixly_server
 
       放置后应存在（必需）:
-        <映射路径>/mixio/mixio   （启动文件）
-        <映射路径>/mixio/config  （配置与证书）
-        <映射路径>/mixly/        （编辑器静态资源）
-      可选（因下载版本而异）:
-        <映射路径>/mixco/        （课程静态资源）
-        <映射路径>/mixai/        （MixAI 静态资源）
-   4. 重新启动容器（docker restart / Container Manager 里重启）
+        <映射路径>/MixlyServer        （启动器）
+        <映射路径>/.host/nw           （NW.js 运行时加载器）
+        <映射路径>/mixio-app/mixio.js （MixIO 服务端）
+      建议保留:
+        <映射路径>/mixly/             （Mixly 编辑器）
+   3. 重新启动容器（docker restart / Container Manager 里重启）
 
- 检测通过后本提示不再出现。
+ 注意：不要把整个 MixSuite-linux-x64 文件夹再套一层，要放它【里面】的内容。
 ==========================================================================
 EOF
 }
@@ -50,11 +64,29 @@ elf_arch() {
     esac
 }
 
-# 包结构检测：mixio/ 与 mixly/ 必需；mixco/、mixai/ 因版本而异，不强制
-if [ ! -d "$MIXIO_DIR" ] || [ ! -d "$SERVER_DIR/mixly" ] || [ ! -f "$BIN" ]; then
+# ---------------------------------------------------------------- 运行包定位
+# 常见误操作：解压后把整个 MixSuite-linux-x64 文件夹放进了映射目录（多套一层）。
+# 容忍一层嵌套：在 $SERVER_DIR 及其下一级目录中找 MixlyServer。
+if [ ! -f "$SERVER_DIR/$BIN_NAME" ]; then
+    for _sub in "$SERVER_DIR"/*/; do
+        [ -f "$_sub/$BIN_NAME" ] || continue
+        warn "在 $_sub 下发现 $BIN_NAME（多嵌套了一层目录）。已自动使用该目录，"
+        warn "但建议解压时直接把 MixSuite-linux-<架构>/ 里面的内容放进映射路径。"
+        SERVER_DIR="${_sub%/}"
+        break
+    done
+fi
+
+APP_DIR="$SERVER_DIR/mixio-app"
+NW_BIN="$SERVER_DIR/.host/nw"
+
+# 包结构检测：启动器 / NW 运行时 / mixio-app 三要素必需；mixly 建议保留
+if [ ! -f "$SERVER_DIR/$BIN_NAME" ] || [ ! -f "$NW_BIN" ] \
+   || [ ! -f "$APP_DIR/package.json" ] || [ ! -f "$APP_DIR/mixio.js" ]; then
     missing_package
     exit 1
 fi
+[ -d "$SERVER_DIR/mixly" ] || warn "未发现 mixly/ 目录：MixIO 服务可正常运行，但 Mixly 编辑器将不可用。"
 
 # 环境校验：运行包架构须与机器架构一致（防止下错压缩包）
 case "$(uname -m)" in
@@ -65,105 +97,88 @@ case "$(uname -m)" in
 esac
 
 if [ -n "$HOST_ARCH" ]; then
-    BIN_ARCH=$(elf_arch "$BIN")
+    BIN_ARCH=$(elf_arch "$NW_BIN")
     if [ "$BIN_ARCH" != "unknown" ] && [ "$BIN_ARCH" != "$HOST_ARCH" ]; then
         cat >&2 <<EOF
 ==========================================================================
  [!] 运行包与机器架构不匹配，容器无法启动。
 
-     当前机器架构:  $HOST_ARCH
-     运行包 mixio 架构: $BIN_ARCH（读取自 $BIN 的 ELF 头）
+     当前机器架构:      $HOST_ARCH
+     运行包 .host/nw 架构: $BIN_ARCH（读取自 ELF 头）
 
-     请从官方百度网盘下载【$HOST_ARCH】架构的 mixly_server 压缩包，
+     请下载【$HOST_ARCH】架构的 MixSuite-linux-$HOST_ARCH.zip，
      解压后替换映射路径中的内容，再重启容器。
 ==========================================================================
 EOF
         exit 1
     fi
-    echo "[INFO] 运行包架构校验通过: $BIN_ARCH（机器: $HOST_ARCH）"
+    log "运行包架构校验通过: $BIN_ARCH（机器: $HOST_ARCH）"
 fi
 
-# zip 解压后常丢失执行位；官方说明亦要求 chmod +x ./mixio
-chmod +x "$BIN" || true
+# ---------------------------------------------------------------- root 准备
+# X11 socket 目录（root 与 --user 两种方式都需要；非 root 时 /tmp 可写也能建）
+mkdir -p /tmp/.X11-unix 2>/dev/null || true
+chmod 1777 /tmp/.X11-unix 2>/dev/null || true
 
-# 可写目录：数据(storage) 项目(store) 日志(logs)，交给容器内 mixly 用户
-mkdir -p "$MIXIO_DIR/storage" "$MIXIO_DIR/store" "$MIXIO_DIR/logs"
-chown -R mixly:mixly "$MIXIO_DIR/storage" "$MIXIO_DIR/store" "$MIXIO_DIR/logs" 2>/dev/null || true
+# 以 root 启动时：预建可写数据目录并交给 mixly 用户、修执行位，
+# 然后用 gosu 降权重新执行本脚本（之后 id -u != 0，跳过本段）。
+if [ "$(id -u)" = "0" ]; then
+    # MixSuite 的可写位置：mixio-app/{storage,logs,config,runtime}（服务数据）、
+    # mixio-app 与套件根目录本身（pid.info / user-data / config 重建）。
+    # .host、mixly、mixco、mixmo 等静态大目录保持 root 只读，不做递归 chown。
+    MIXLY_UID=$(id -u mixly)
+    for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" "$APP_DIR/runtime"; do
+        mkdir -p "$_d"
+        [ "$(stat -c '%u' "$_d" 2>/dev/null)" = "$MIXLY_UID" ] || chown -R mixly:mixly "$_d"
+    done
+    mkdir -p "$SERVER_DIR/user-data"
+    [ "$(stat -c '%u' "$SERVER_DIR/user-data" 2>/dev/null)" = "$MIXLY_UID" ] \
+        || chown -R mixly:mixly "$SERVER_DIR/user-data"
+    chown mixly:mixly "$SERVER_DIR" "$APP_DIR"
 
-cd "$MIXIO_DIR"
+    # zip 解压后常丢失执行位；firstrun.sh 亦要求对这三个文件 chmod +x
+    chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" \
+        "$SERVER_DIR/.host/chrome_crashpad_handler" 2>/dev/null || true
 
-# ---------------------------------------------------------------------------
-# 启动方式（重要，勿改回 exec）
-#
-# 运行包内 mixio 的实际行为：
-#   start -> spawn 分离的子进程 `mixio debug`（stdout/stderr 重定向到 logs/*.log），
-#            父进程仅在启动阶段把日志文件旁路打印到 stdout，
-#            读到 "Database Connected!" 后 unref 子进程并 process.exit()
-#   debug -> 真正的服务进程，启动时把自身 PID 写入 pid.info
-#   stop  -> 读取 pid.info 并向其发送 SIGTERM
-#
-# 原生部署没问题，但容器里主进程（PID 1 的直接子进程）一退出，
-# 整个 PID 命名空间即被销毁：表现为"服务正常启动后过一会儿容器自动停止、
-# 日志里没有任何报错"，restart 策略再把它拉起，如此反复。
-#
-# 因此这里改为：后台启动 -> 保持前台存活守护 -> 收到停止信号时优雅退服。
-# ---------------------------------------------------------------------------
+    # gosu 不改 HOME；Chromium/NW 的 crashpad、fontconfig 等组件需要可写的 HOME
+    export HOME="/tmp/mixly-home"
+    mkdir -p "$HOME" && chown mixly:mixly "$HOME"
 
-# 清理上次运行残留的 pid.info：容器每次启动都是全新的 PID 命名空间，
-# 旧 PID 只会让后续 `mixio stop` 误杀无关进程
-rm -f "$MIXIO_DIR/pid.info"
-
-on_stop() {
-    echo "[INFO] 收到停止信号，正在停止 MixIO ..."
-    su-exec mixly:mixly ./mixio stop 2>/dev/null || true
-    exit 0
-}
-trap on_stop TERM INT
-
-# 官方指令：mixio start / stop / help（见 https://gitee.com/mixly2/mixio）
-# 其自身会 daemon 化，命令本身很快返回
-su-exec mixly:mixly ./mixio start &
-START_PID=$!
-
-# 等 pid.info 出现（= 真正的服务进程已起来）；最多等 90 秒（慢机型留足余量）
-waited=0
-while [ ! -s "$MIXIO_DIR/pid.info" ]; do
-    # start 进程已结束且没写出 pid.info -> 未以后台方式运行，按它的退出码结束容器
-    kill -0 "$START_PID" 2>/dev/null || break
-    [ "$waited" -ge 90 ] && break
-    sleep 1
-    waited=$((waited + 1))
-done
-
-if [ ! -s "$MIXIO_DIR/pid.info" ]; then
-    set +e
-    wait "$START_PID"
-    rc=$?
-    set -e
-    # 少数 shell 对已回收的子进程返回 127，视作正常结束
-    [ "$rc" -eq 127 ] && rc=0
-    exit "$rc"
+    exec gosu mixly:mixly "$0" "$@"
 fi
 
-SERVICE_PID="$(tr -dc '0-9' < "$MIXIO_DIR/pid.info" 2>/dev/null || true)"
+# 非 root 直接运行（--user）时尽量修执行位，失败不致命
+chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" 2>/dev/null || true
 
-if [ -z "$SERVICE_PID" ]; then
-    echo "[WARN] pid.info 内无有效 PID，容器保持前台存活（MixIO 可能在当前进程内运行）。"
-else
-    echo "[INFO] MixIO 服务进程 PID: $SERVICE_PID，容器进入守护状态。"
-    # 服务进程的输出只写日志文件（原父进程退出后不再旁路），这里跟随最新日志，
-    # 让 docker logs / Container Manager 持续可观测
-    NEWEST_LOG="$(ls -t "$MIXIO_DIR"/logs/*.log 2>/dev/null | head -n 1 || true)"
-    if [ -n "$NEWEST_LOG" ]; then
-        tail -f "$NEWEST_LOG" &
-    fi
-fi
+# ---------------------------------------------------------------- Xvfb 虚拟显示
+# NW.js 需要 X11 才能建窗口；服务端部署用 Xvfb 兜底。浏览器访问不依赖它。
+DISPLAY_NUM="${MIXLY_DISPLAY_NUM:-99}"
+export DISPLAY=":${DISPLAY_NUM}"
+# 同一容器重启后 PID 命名空间是全新的，上一次的 X socket/lock 已是残留
+rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
-# 守护：服务进程消失则结束容器（交由 restart 策略重新拉起）
-while :; do
-    if [ -n "$SERVICE_PID" ] && [ ! -d "/proc/$SERVICE_PID" ]; then
-        echo "[ERROR] MixIO 服务进程 $SERVICE_PID 已退出，容器结束（若配置 restart 策略会自动重启）。"
+Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp &
+XVFB_PID=$!
+
+_waited=0
+while [ ! -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
+    kill -0 "$XVFB_PID" 2>/dev/null || {
+        echo "[entrypoint][ERROR] Xvfb 启动失败（虚拟显示不可用）。" >&2
         exit 1
-    fi
-    sleep 10 & wait $!
+    }
+    [ "$_waited" -ge 15 ] && {
+        echo "[entrypoint][ERROR] Xvfb 就绪超时（15s）。" >&2
+        exit 1
+    }
+    sleep 1
+    _waited=$((_waited + 1))
 done
+log "Xvfb 虚拟显示已就绪: $DISPLAY"
+
+# ---------------------------------------------------------------- 启动服务
+# MixlyServer 前台运行：内部 exec .host/nw（--no-sandbox --disable-gpu
+# --user-data-dir=<套件根>/user-data）加载 mixio-app，MixIO 服务在 NW 进程内
+# 运行，SIGTERM/SIGINT 由应用自行优雅处理，直接 exec 交给 tini 转发信号。
+log "正在启动 MixlyServer（MixIO 服务将在 NW.js 进程内运行）..."
+cd "$SERVER_DIR"
+exec "./$BIN_NAME"

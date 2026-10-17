@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 入口脚本冒烟测试：无需官方运行包，用假运行包 + ELF 桩二进制
+# 入口脚本冒烟测试：无需官方 MixSuite 运行包，用假运行包 + ELF 桩二进制
 # 校验容器启动链路。用法: smoke-test.sh <image>
 set -euo pipefail
 
@@ -9,47 +9,83 @@ PASS=0
 ok() { echo "✅ $1"; PASS=$((PASS + 1)); }
 fail() { echo "❌ $1"; exit 1; }
 
-# 生成 x86_64 静态 ELF 桩（不依赖容器内 glibc/gcompat 环境）
+# 生成静态 ELF 桩（不依赖容器内 glibc 环境）；放在 .host/nw 供架构校验
 make_stub() { # $1 = 输出路径
     cat > /tmp/mixly-stub.c <<'EOF'
 #include <stdio.h>
-int main(void) { puts("stub-ok"); return 0; }
+int main(void) { puts("stub-nw-ok"); return 0; }
 EOF
     gcc -static -o "$1" /tmp/mixly-stub.c
 }
 
-# 组装假运行包: $1=目录 $2=arm64 时把 e_machine 伪造成 aarch64
+# 组装假 MixSuite 包: $1=目录 $2=arm64 时把 .host/nw 的 e_machine 伪造成 aarch64
 make_pkg() {
     local dir="$1" fake="$2"
-    mkdir -p "$dir/mixio" "$dir/mixly" "$dir/mixco"
-    make_stub "$dir/mixio/mixio"
+    mkdir -p "$dir/.host" "$dir/mixio-app" "$dir/mixly"
+    make_stub "$dir/.host/nw"
     if [ "$fake" = "arm64" ]; then
-        printf '\xb7\x00' | dd of="$dir/mixio/mixio" bs=1 seek=18 conv=notrunc status=none
+        printf '\xb7\x00' | dd of="$dir/.host/nw" bs=1 seek=18 conv=notrunc status=none
     fi
-    chmod +x "$dir/mixio/mixio"
+    # MixlyServer 桩：打印标记后前台常驻（MixSuite 版 MixlyServer 前台运行、不 daemon 化），
+    # 捕获 TERM/INT 模拟官方应用的优雅退出
+    cat > "$dir/MixlyServer" <<'STUB'
+#!/bin/sh
+echo "[INFO] stub MixlyServer running (foreground)"
+trap 'echo "[INFO] stub received stop signal, exiting"; exit 0' TERM INT
+while :; do sleep 5 & wait $!; done
+STUB
+    echo '{}' > "$dir/mixio-app/package.json"
+    echo '// stub mixio.js' > "$dir/mixio-app/mixio.js"
+    echo '{"version":"4.0.0-test"}' > "$dir/mixly/version.json"
+    chmod +x "$dir/MixlyServer" "$dir/.host/nw"
+}
+
+# 等待容器日志出现指定内容（轮询，避免固定 sleep 拖慢/抖动）
+wait_log() { # $1=cid $2=pattern $3=timeout_seconds
+    local cid="$1" pat="$2" timeout="$3" i=0
+    while [ "$i" -lt "$timeout" ]; do
+        docker logs "$cid" 2>&1 | grep -q "$pat" && return 0
+        sleep 1; i=$((i + 1))
+    done
+    return 1
 }
 
 echo "=== T1 缺包检测 ==="
 out=$(docker run --rm "$IMAGE" 2>&1) && rc=0 || rc=$?
 [ "$rc" -ne 0 ] || fail "T1 无运行包时应非零退出"
 echo "$out" | grep -q "未检测到 Mixly 官方运行包" || fail "T1 未输出放置指引"
-ok "T1 缺包时输出放置指引并退出 (exit=$rc)"
+echo "$out" | grep -q "MixSuite-linux-x64.zip" || fail "T1 放置指引未提及 MixSuite 包名"
+ok "T1 缺包时输出 MixSuite 放置指引并退出 (exit=$rc)"
 
-echo "=== T2 启动链路（架构匹配的 x64 桩）==="
+echo "=== T2 启动链路（架构匹配的 x64 桩：Xvfb + 前台 exec + 数据目录）==="
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-out=$(docker run --rm -v "$tmp:/opt/mixly_server" "$IMAGE" 2>&1) && rc=0 || rc=$?
-echo "$out"
-[ "$rc" -eq 0 ] || fail "T2 应零退出"
-echo "$out" | grep -q "stub-ok" || fail "T2 桩二进制未被 exec 执行"
-echo "$out" | grep -q "运行包架构校验通过" || fail "T2 架构校验未通过"
-for d in storage store logs; do
-    [ -d "$tmp/mixio/$d" ] || fail "T2 未创建数据目录 $d"
-done
-uid=$(stat -c '%u' "$tmp/mixio/storage")
-[ "$uid" != "0" ] || fail "T2 数据目录仍为 root 属主"
-ok "T2 校验/chmod/chown/su-exec 全链路通过（数据目录 uid=$uid）"
-rm -rf "$tmp"
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t2_fail=""
+wait_log "$cid" "stub MixlyServer running" 60 || t2_fail="桩二进制未被 exec 执行"
+if [ -z "$t2_fail" ]; then
+    c_logs=$(docker logs "$cid" 2>&1)
+    echo "$c_logs" | grep -q "运行包架构校验通过" || t2_fail="架构校验未通过"
+    echo "$c_logs" | grep -q "Xvfb 虚拟显示已就绪" || t2_fail="Xvfb 未就绪"
+fi
+if [ -z "$t2_fail" ]; then
+    for d in storage logs config runtime; do
+        [ -d "$tmp/mixio-app/$d" ] || t2_fail="未创建数据目录 mixio-app/$d"
+    done
+    [ -d "$tmp/user-data" ] || t2_fail="未创建 user-data 目录"
+fi
+if [ -z "$t2_fail" ]; then
+    uid=$(stat -c '%u' "$tmp/mixio-app/storage")
+    [ "$uid" != "0" ] || t2_fail="数据目录仍为 root 属主"
+fi
+if [ -n "$t2_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -30 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t2_fail" ] || fail "T2 $t2_fail"
+ok "T2 校验/chmod/chown/Xvfb/exec 全链路通过（数据目录 uid=$uid，非 root）"
 
 echo "=== T3 架构不匹配（x86_64 机器 + arm64 桩）==="
 tmp=$(mktemp -d)
@@ -58,66 +94,38 @@ out=$(docker run --rm -v "$tmp:/opt/mixly_server" "$IMAGE" 2>&1) && rc=0 || rc=$
 echo "$out"
 [ "$rc" -ne 0 ] || fail "T3 架构不匹配时应非零退出"
 echo "$out" | grep -q "运行包与机器架构不匹配" || fail "T3 缺少不匹配提示"
+rm -rf "$tmp" 2>/dev/null || true
 ok "T3 下错架构包被明确拦截"
-rm -rf "$tmp"
 
 echo "=== T4 镜像元数据 ==="
 ep=$(docker inspect -f '{{json .Config.Entrypoint}}' "$IMAGE")
 echo "$ep" | grep -q "tini" || fail "T4 Entrypoint 未使用 tini: $ep"
 ports=$(docker inspect -f '{{json .Config.ExposedPorts}}' "$IMAGE")
-for p in 8080 8443 18084 1883 8082 8083 8084 8086; do
+for p in 8443 18084 1883 8082 8083 8084 8086; do
     echo "$ports" | grep -q "\"$p/tcp\"" || fail "T4 缺少端口声明 $p: $ports"
 done
-ok "T4 Entrypoint(tini) 与 8 个端口声明正确"
+echo "$ports" | grep -q "\"8080/tcp\"" && fail "T4 MixSuite 强制 HTTPS，不应再暴露 8080" || true
+ok "T4 Entrypoint(tini) 与 7 个端口声明正确（无 8080）"
 
-echo "=== T5 守护模式（mixio 自我 daemon 化后容器不应停止）==="
+echo "=== T5 前台运行保活 + docker stop 优雅退出 ==="
 tmp=$(mktemp -d)
-mkdir -p "$tmp/mixio" "$tmp/mixly"
-# 模拟官方 mixio 的真实行为：start 会起后台 debug 子进程后父进程退出，
-# debug 才是真正的服务进程（写 pid.info），stop 依据 pid.info 结束它
-cat > "$tmp/mixio/mixio" <<'STUB'
-#!/bin/sh
-case "$1" in
-  start)
-    ./mixio debug >> "logs/$(date +%H%M%S).log" 2>&1 &
-    sleep 1
-    echo "[INFO] MixIO server is running now."
-    exit 0
-    ;;
-  debug)
-    echo "[INFO] MixIO server is running with PID $$"
-    echo $$ > pid.info
-    while :; do echo "[INFO] heartbeat $$"; sleep 5; done
-    ;;
-  stop)
-    pid=$(cat pid.info 2>/dev/null)
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-    echo "MixIO server with PID $pid is stopped."
-    ;;
-esac
-STUB
-chmod -R 777 "$tmp"   # 容器内以非 root(mixly) 运行，需可写 pid.info / logs
+make_pkg "$tmp" x86_64
 cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
 t5_fail=""
-sleep 10
-[ "$(docker inspect -f '{{.State.Running}}' "$cid")" = "true" ] || t5_fail="mixio daemon 化后容器不应停止"
-if [ -z "$t5_fail" ]; then
-    c_logs=$(docker logs "$cid" 2>&1)
-    echo "$c_logs" | grep -q "容器进入守护状态" || t5_fail="未进入守护状态"
-    echo "$c_logs" | grep -q "heartbeat" || t5_fail="服务日志未跟随到容器输出"
-fi
+sleep 8
+[ "$(docker inspect -f '{{.State.Running}}' "$cid")" = "true" ] || t5_fail="前台运行中容器不应自行停止"
 docker stop -t 15 "$cid" >/dev/null 2>&1 || true
 if [ -z "$t5_fail" ]; then
-    docker logs "$cid" 2>&1 | grep -q "收到停止信号" || t5_fail="停止时未走优雅退服"
+    docker logs "$cid" 2>&1 | grep -q "stub received stop signal" || t5_fail="停止时未走优雅退服"
 fi
 if [ -n "$t5_fail" ]; then
     echo "----- 容器日志（末 30 行）-----"
     docker logs "$cid" 2>&1 | tail -30 || true
 fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
-# 容器内以 uid 100 写入的文件可能让 runner 用户无法删除；清理失败无所谓（runner 为一次性环境）
+# 容器内以 mixly 用户写入的文件可能让 runner 用户无法删除；清理失败无所谓（runner 为一次性环境）
 rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t5_fail" ] || fail "T5 $t5_fail"
-ok "T5 daemon 化后容器保持运行，docker stop 走优雅退服"
+ok "T5 前台运行容器保持存活，docker stop 优雅退服"
 
 echo "🎉 冒烟测试全部通过: $PASS/5"
