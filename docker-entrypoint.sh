@@ -527,9 +527,11 @@ if [ "${MIXLY_DIRECT_NW:-0}" = "1" ]; then
     cd "$SERVER_DIR"
     trap 'kill -TERM "$MIXLY_PID" 2>/dev/null || true' TERM INT
     _t0=$(date +%s)
+    # 用 exec 让子 shell 被 nw 自身替换：否则 MIXLY_PID 只是子 shell 的 PID，
+    # 上面的 trap 发 TERM 会打在壳上而 nw 收不到，只能等容器被整体 SIGKILL。
     ( export LD_LIBRARY_PATH="$NW_LIB"
       # shellcheck disable=SC2086
-      "$SERVER_DIR/.host/nw" $NW_COMMON_ARGS --enable-logging=stderr ) &
+      exec "$SERVER_DIR/.host/nw" $NW_COMMON_ARGS --enable-logging=stderr ) &
     MIXLY_PID=$!
     _rc=0
     wait "$MIXLY_PID" || _rc=$?
@@ -672,6 +674,13 @@ case "$_rc" in
              log "    2) 内部日志：docker run -e MIXLY_DIRECT_NW=1 ..."
              log "       跳过官方启动器直连 .host/nw，并打开 Chromium 内部日志"
              log "       (--enable-logging=stderr)，窗口为何是 0 会直接说出来。"
+             log "  ▸ 同时确认 runtime/nw-main-error.log："
+             if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
+                 log "       >>> 已有内容，已打印在上方"
+             else
+                 log "       >>> docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log'"
+                 log "       >>> （本次为空即证明 mixio.js 已加载成功、init() 已通过）"
+             fi
              log "  ▸ 注意：官方 MixlyServer 启动器是 fork+execv，父进程 stdout 在"
              log "    管道下全缓冲，其 'Checking ports / Starting NW runtime' 等进度"
              log "    会随缓冲区一起丢失 —— 日志里看不到它们属正常，不代表没执行。"
