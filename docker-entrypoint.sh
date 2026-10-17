@@ -458,12 +458,22 @@ NW_USERDATA="$SERVER_DIR/user-data"
 NW_LIB="$SERVER_DIR/.host/lib:$SERVER_DIR/.host"
 NW_COMMON_ARGS="--nwapp=$NW_APP --user-data-dir=$NW_USERDATA --ozone-platform=x11 --ozone-platform-hint=x11 --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu --disable-dev-shm-usage --in-process-gpu"
 
-# ------------------------------------------- 可选：NW.js 最小窗口自检
+# 直连模式的公共参数：与官方启动器一致的核心集合 + Chromium 内部日志。
+# 与 NW_COMMON_ARGS 的差别：默认【不】强制 ozone（让 Chromium 自动探测 X11），
+# 且追加 --enable-logging=stderr，把「窗口句柄为何是 0 / 为何退出」交给
+# Chromium 自己说。策略 3 才补回 ozone 两个开关。
+NW_DIRECT_BASE="--nwapp=$NW_APP --user-data-dir=$NW_USERDATA --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu --disable-dev-shm-usage --in-process-gpu --enable-logging=stderr"
+
+# ------------------------------------------- NW.js 最小窗口自检（可复用函数）
 # 目的：把「NW.js/Chromium 在本容器能否创建窗口」与「MixSuite 应用层是否有问题」
 # 一刀切开。CI 冒烟测试用桩替换了 MixlyServer，真实 Chromium 从未被验证过，
 # 所以 CI 全绿不等于镜像依赖齐备。
-# 用法：docker run -e MIXLY_NW_SELFTEST=1 ...，容器只做自检然后退出。
-if [ "${MIXLY_NW_SELFTEST:-0}" = "1" ]; then
+# 用法：run_nw_selftest <超时秒数>
+# 调用方：
+#   * MIXLY_NW_SELFTEST=1 显式自检（交互式取证）
+#   * 短命-0 退出时的 auto_forensics（自动取证，用户无需执行任何命令）
+run_nw_selftest() {
+    _st_timeout="${1:-40}"
     ST="$APP_DIR/runtime/nw-selftest"
     rm -rf "$ST"
     mkdir -p "$ST"
@@ -491,10 +501,10 @@ PKG
 </script></body></html>
 HTM
     chmod -R a+rwX "$ST" 2>/dev/null || true
-    log "[自检] 正在以最小 NW.js 应用测试窗口创建（约 40s 上限）..."
+    log "[自检] 正在以最小 NW.js 应用测试窗口创建（约 ${_st_timeout}s 上限）..."
     log "[自检] X 显示: $DISPLAY；Xvfb PID: $XVFB_PID"
     _st_rc=0
-    ( cd "$ST" && LD_LIBRARY_PATH="$NW_LIB" timeout 40 "$SERVER_DIR/.host/nw" \
+    ( cd "$ST" && LD_LIBRARY_PATH="$NW_LIB" timeout "$_st_timeout" "$SERVER_DIR/.host/nw" \
         --nwapp="$ST" --user-data-dir="$SERVER_DIR/user-data" \
         --ozone-platform=x11 --ozone-platform-hint=x11 --no-sandbox \
         --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu \
@@ -506,11 +516,27 @@ HTM
         log "[自检]       请用 MIXLY_DIRECT_NW=1 取得 Chromium 内部日志后再定位。"
     else
         log "[自检] ❌ 失败：窗口未创建成功（退出码 $_st_rc）。"
-        log "[自检] 结论：NW.js/Chromium 在本容器建不了窗口，属镜像运行时依赖问题。"
+        log "[自检] 结论：NW.js/Chromium 在本容器建不了窗口，属镜像运行时/环境问题。"
         log "[自检] 请把本段完整日志（含上面的 stderr）反馈，以便补依赖。"
     fi
     log "[自检] 关键线索：若上方出现 'XGetWindowAttributes failed' / 'cannot open display'"
     log "[自检] / 'Failed to connect to the bus' 之外的其他错误，即为直接原因。"
+    # X 服务器能力证据：窗口建失败时，visual/扩展缺失是最常见的环境根因。
+    # 注意：Xvfb 无 ARGB visual、缺 RANDR/DAMAGE 等都会让 Chromium 建窗失败，
+    # 而这类信息只有 xdpyinfo 能直接给出。
+    if command -v xdpyinfo >/dev/null 2>&1; then
+        log "[自检] --- xdpyinfo（X 服务器 visual 与扩展）---"
+        xdpyinfo -display "$DISPLAY" 2>&1 | sed -n '1,45p' | sed 's/^/[自检]   /' || true
+    fi
+}
+
+# ------------------------------------------- 可选：NW.js 最小窗口自检（显式模式）
+# 目的：把「NW.js/Chromium 在本容器能否创建窗口」与「MixSuite 应用层是否有问题」
+# 一刀切开。CI 冒烟测试用桩替换了 MixlyServer，真实 Chromium 从未被验证过，
+# 所以 CI 全绿不等于镜像依赖齐备。
+# 用法：docker run -e MIXLY_NW_SELFTEST=1 ...，容器只做自检然后退出。
+if [ "${MIXLY_NW_SELFTEST:-0}" = "1" ]; then
+    run_nw_selftest 40
     exit 0
 fi
 
@@ -638,23 +664,175 @@ fi
   log "  docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log'"
   log "  docker exec <容器> sh -c 'netstat -lntp | grep -E \"8443|18084\"'" ) &
 
+# ---------------------------------------------------------------- 启动策略
+# 「约 3 秒退出码 0 + 窗口句柄 0」是 NW.js 窗口层故障的签名：mixio.js 已加载成功
+# （nw-main-error.log 为空已证明），故障在 NW 壳/窗口层，不在 MixIO 初始化。
+# 它可能与启动参数/X11 环境有关，但单次运行无法区分。这里把「重启循环」本身
+# 变成 A/B 实验，用户不需要执行任何诊断命令：
+#   * 连续短命-0 失败时，每次重启自动切换一种启动方式（共 4 种，轮换）；
+#   * 其它退出（正常停止/崩溃/超时，即非短命-0）重置计数，下次仍从官方启动器开始；
+#   * 计数文件在挂载卷内（runtime/boot-attempt），跨重启保留；
+#   * 显式设置 MIXLY_NW_SELFTEST / MIXLY_DIRECT_NW 时完全听用户的，不介入。
+# 每次启动都打印所用策略；短命失败时自动执行 auto_forensics 取证。
+ATTEMPT_FILE="$APP_DIR/runtime/boot-attempt"
+PORT_PROBE_STATE="$APP_DIR/runtime/port-probe.state"
+STRATEGY=1
+STRATEGY_DESC="官方启动器（stdbuf 行缓冲，启动器进度可见）"
+
+# 8443 快速探针（1s 间隔，启动时就开始）：记录 HTTPS 服务首次响应的时刻。
+# 短命退出时它是关键证据——服务到底起没起来过，直接决定排查方向：
+# 起来了 = 窗口/渲染层问题；从未起来 = MixIO 初始化问题。
+: > "$PORT_PROBE_STATE" 2>/dev/null || true
+( _pp_first=0; _pp_cnt=0; _pp_i=0
+  while [ "$_pp_i" -lt 600 ]; do
+      if curl -ksf -o /dev/null --max-time 2 https://127.0.0.1:8443/ 2>/dev/null; then
+          _pp_cnt=$((_pp_cnt + 1))
+          if [ "$_pp_first" = 0 ]; then
+              _pp_first=$(date +%s)
+              log "端口探针: 8443 首次响应（$(date -d @"$_pp_first" '+%H:%M:%S' 2>/dev/null || echo "$_pp_first")），MixIO HTTPS 服务已就绪"
+          fi
+          echo "up $_pp_first $_pp_cnt" > "$PORT_PROBE_STATE" 2>/dev/null || true
+      fi
+      sleep 1
+      _pp_i=$((_pp_i + 1))
+  done ) &
+
+if [ "${MIXLY_NW_SELFTEST:-0}" != "1" ] && [ "${MIXLY_DIRECT_NW:-0}" != "1" ]; then
+    _prev=0
+    if [ -f "$ATTEMPT_FILE" ]; then
+        _prev=$(tr -dc '0-9' < "$ATTEMPT_FILE" 2>/dev/null || true)
+        [ -n "$_prev" ] || _prev=0
+        [ "$_prev" -gt 4 ] && _prev=4
+    fi
+    STRATEGY=$((_prev + 1))
+    [ "$STRATEGY" -gt 4 ] && STRATEGY=1
+    case "$STRATEGY" in
+        1) STRATEGY_DESC="官方启动器（stdbuf 行缓冲，启动器进度可见）" ;;
+        2) STRATEGY_DESC="直连 .host/nw（不指定 ozone，Chromium 自动探测 X11）" ;;
+        3) STRATEGY_DESC="直连 .host/nw（强制 ozone x11，与官方启动器参数一致）" ;;
+        4) STRATEGY_DESC="直连 .host/nw（关闭原生窗口遮挡检测 CalculateNativeWinOcclusion）" ;;
+    esac
+    echo "$STRATEGY" > "$ATTEMPT_FILE" 2>/dev/null || true
+fi
+log "启动策略 $STRATEGY/4: $STRATEGY_DESC"
+
+# 按策略启动；统一设置 MIXLY_PID 供 trap / wait 使用
+launch_strategy() {
+    cd "$SERVER_DIR"
+    case "$STRATEGY" in
+        1)
+            # stdbuf 强制行缓冲：官方启动器的 stdout 在管道下本是全缓冲，
+            # "Checking ports / Starting NW runtime / Loading MixIO service /
+            #  MixlyServer exited before becoming ready" 等关键进度会随缓冲区
+            # 整体丢失，连 "Port conflict detected" 都看不到。LD_PRELOAD 与
+            # _STDBUF_* 环境变量会经 exec 传给 fork 出的 nw 子进程，node 侧
+            # console.log（如 "[INFO] MixIO 服务器正在运行，PID: ..."）也能实时可见。
+            if command -v stdbuf >/dev/null 2>&1; then
+                log "通过 stdbuf -oL -eL 启动官方 MixlyServer（强制行缓冲，启动器进度不再丢失）"
+                stdbuf -oL -eL ./"$BIN_NAME" &
+            else
+                warn "stdbuf 不可用，直接启动官方 MixlyServer（其进度输出可能因全缓冲丢失）"
+                ./"$BIN_NAME" &
+            fi
+            ;;
+        2|3|4)
+            _extra=""
+            case "$STRATEGY" in
+                3) _extra="--ozone-platform=x11 --ozone-platform-hint=x11" ;;
+                4) _extra="--disable-features=CalculateNativeWinOcclusion" ;;
+            esac
+            log "直连模式: 跳过官方启动器，直接运行 .host/nw（附加参数: ${_extra:-无}）"
+            ( export LD_LIBRARY_PATH="$NW_LIB"
+              # shellcheck disable=SC2086
+              exec "$SERVER_DIR/.host/nw" $NW_DIRECT_BASE $_extra ) &
+            ;;
+    esac
+    MIXLY_PID=$!
+}
+
+# ---------------------------------------------------------------- 自动取证
+# 短命-0 退出时自动执行：把原本需要用户手动 docker exec 的取证全部打印到
+# docker logs。用户要做的只有一件事：把「自动取证开始」到结束之间的日志反馈。
+auto_forensics() {
+    log "==================== 自动取证开始 ===================="
+
+    log "--- 1) 8443 端口探针（1s 间隔，启动时就开始）---"
+    if [ -f "$PORT_PROBE_STATE" ]; then
+        _pps=$(cat "$PORT_PROBE_STATE" 2>/dev/null || true)
+        case "$_pps" in
+            up*) log "    HTTPS 服务曾就绪：$_pps（格式: up 首次响应Unix时间 累计响应次数）" ;;
+            *)   log "    HTTPS 服务从未就绪（探针状态: ${_pps:-无记录}）" ;;
+        esac
+    else
+        log "    无探针记录"
+    fi
+
+    log "--- 2) mixio-app/logs 末 15 行 ---"
+    if ls "$APP_DIR/logs"/*.log >/dev/null 2>&1; then
+        tail -n 15 "$APP_DIR/logs"/*.log 2>/dev/null | head -60 | sed 's/^/[entrypoint]   /' || true
+    else
+        log "    （无日志文件 —— mixio.js 未走到写日志那一步，或日志目录未生成）"
+    fi
+
+    log "--- 3) runtime/nw-main-error.log ---"
+    if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
+        cat "$APP_DIR/runtime/nw-main-error.log" 2>/dev/null | sed 's/^/[entrypoint]   /' || true
+    else
+        log "    空/不存在 = mixio.js 顶层加载成功，故障在 NW 壳/窗口层"
+    fi
+
+    log "--- 4) 进程与 Xvfb 状态 ---"
+    ps -o pid,ppid,stat,comm -e 2>/dev/null | head -20 | sed 's/^/[entrypoint]   /' || true
+    if kill -0 "$XVFB_PID" 2>/dev/null; then
+        log "    Xvfb (PID $XVFB_PID) 存活"
+    else
+        log "    Xvfb (PID $XVFB_PID) 已死亡！DISPLAY 失效会直接导致窗口销毁、NW.js 以退出码 0 结束"
+    fi
+
+    log "--- 5) NW.js 最小窗口自检（隔离环境问题与应用层问题）---"
+    run_nw_selftest 20
+
+    log "==================== 自动取证结束 ===================="
+    log "请把「自动取证开始」到「自动取证结束」之间的完整日志反馈，即可定位根因。"
+}
+
 cd "$SERVER_DIR"
 # 这里刻意【不用 exec】：保留退出码并转发信号。MixlyServer 静默退出是当前最需要
 # 诊断的场景（容器 running→进程没了→重启策略拉起，日志里看不到任何原因），
 # 退出码是判断崩溃类型的第一手证据：139=段错误 134=abort 143=正常停止。
-trap 'kill -TERM "$MIXLY_PID" 2>/dev/null || true' TERM INT
+# _STOP_REQUESTED：区分「进程自己短命退出」与「docker stop 导致的退出」——
+# 后者不该触发窗口层故障的自动取证（用户手动停止是正常流程）。
+_STOP_REQUESTED=0
+trap '_STOP_REQUESTED=1; kill -TERM "$MIXLY_PID" 2>/dev/null || true' TERM INT
 _t0=$(date +%s)
-./"$BIN_NAME" &
-MIXLY_PID=$!
+launch_strategy
 # 脚本顶部有 set -e，而 wait 在子进程非零退出时返回非零 —— 必须用 || 捕获，
 # 否则 set -e 会在此直接终止脚本，下面的退出码解读永远不会执行。
 _rc=0
 wait "$MIXLY_PID" || _rc=$?
 _uptime=$(( $(date +%s) - _t0 ))
 log "MixlyServer 进程已退出，退出码: $_rc（本次存活 ${_uptime}s）"
+
+# 短命-0 判定：自己退的（非停止信号触发）且 15s 内以退出码 0 结束。
+# 这是 NW.js 窗口层故障的签名（窗口提前销毁 → 所有窗口关闭即退出）。
+_FAST_FAIL=0
+if [ "$_rc" = "0" ] && [ "$_uptime" -lt 15 ] && [ "$_STOP_REQUESTED" != "1" ]; then
+    _FAST_FAIL=1
+fi
+
+# 策略计数：只有「短命-0」推进策略；其它退出（正常停止/崩溃/超时）重置，
+# 下次重启仍从官方启动器开始。
+if [ "$_FAST_FAIL" = "1" ]; then
+    :
+else
+    echo 0 > "$ATTEMPT_FILE" 2>/dev/null || true
+fi
+
 case "$_rc" in
     0)   log "退出码 0 = 应用主动退出，并非'正常退出'。"
-         if [ "$_uptime" -lt 15 ]; then
+         if [ "$_STOP_REQUESTED" = "1" ]; then
+             log "  ▸ 本次是收到停止信号后的退出（docker stop / restart），属正常流程。"
+         elif [ "$_FAST_FAIL" = "1" ]; then
              log "  ▸ 存活仅 ${_uptime}s（远小于 120s），排除'就绪探测超时'。"
              log "  ▸ 这是 NW.js「所有窗口被关闭即自动退出」：窗口提前销毁，"
              log "    而 nw-boot.html 自身永远不会主动退出（其 onTimeout 只改文案）。"
@@ -662,28 +840,16 @@ case "$_rc" in
              log "    nw-main-error.log），所以故障在 NW 壳/窗口层，不在 MixIO 初始化。"
              log "  ▸ 关键证据在 stderr：'XGetWindowAttributes failed for window 0'"
              log "    —— 窗口句柄是 0，说明窗口从未真正创建成功，随后被销毁。"
-             log "  ▸ 已排除的猜测（实测证伪，不要再往这个方向查）："
-             log "      - 残留 PID 误杀 Xvfb：pid.info 里的旧 PID(如 203)在容器内"
-             log "        并不存在，kill 只会 ESRCH；且 Xvfb 全程存活、无被杀记录。"
-             log "      - /dev/shm 不足：那会得到退出码 139(SIGSEGV)，不是 0。"
-             log "      - 证书：package.json 已含 --ignore-certificate-errors。"
-             log "  ▸ 下一步取证（按顺序，二选一即可）："
-             log "    1) 环境自检：docker run -e MIXLY_NW_SELFTEST=1 ..."
-             log "       用最小 NW 应用测本容器能否创建窗口，直接区分"
-             log "       「镜像依赖问题」与「MixSuite 应用层问题」。"
-             log "    2) 内部日志：docker run -e MIXLY_DIRECT_NW=1 ..."
-             log "       跳过官方启动器直连 .host/nw，并打开 Chromium 内部日志"
-             log "       (--enable-logging=stderr)，窗口为何是 0 会直接说出来。"
-             log "  ▸ 同时确认 runtime/nw-main-error.log："
-             if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
-                 log "       >>> 已有内容，已打印在上方"
-             else
-                 log "       >>> docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log'"
-                 log "       >>> （本次为空即证明 mixio.js 已加载成功、init() 已通过）"
-             fi
-             log "  ▸ 注意：官方 MixlyServer 启动器是 fork+execv，父进程 stdout 在"
-             log "    管道下全缓冲，其 'Checking ports / Starting NW runtime' 等进度"
-             log "    会随缓冲区一起丢失 —— 日志里看不到它们属正常，不代表没执行。"
+             log "  ▸ 本次启动策略 $STRATEGY/4: $STRATEGY_DESC"
+             log "  ▸ 以下为自动取证输出（无需手动执行任何命令）："
+             auto_forensics
+             # 记录本次短命失败：下次重启自动切换启动策略（轮换 1→2→3→4→1）
+             echo "$STRATEGY" > "$ATTEMPT_FILE" 2>/dev/null || true
+             _next=$((STRATEGY + 1))
+             [ "$_next" -gt 4 ] && _next=1
+             log "  ▸ 已记录本次失败；下次重启自动切换策略 $_next/4。"
+             log "  ▸ 若某种策略下容器持续存活（超过 15s），计数器自动重置，"
+             log "    之后仍从官方启动器开始——不需要你做任何操作。"
          else
              log "  ▸ 最常见原因：启动器就绪探测（约 120 次 x 500ms）超时后放弃。"
              log "  ▸ 这几乎总是意味着 MixIO 内部初始化抛错且异常被吞掉。"

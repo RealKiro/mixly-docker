@@ -5,7 +5,7 @@
 #
 # 背景：Mixly 4.0 起官方只有一个发行版——内置 MixIO 的 MixSuite，
 # 与旧版 mixly_server（Node/pkg 单文件 mixio）的本质区别：
-#   * MixlyServer 是 NW.js(Chromium 107 + Node) 桌面壳：启动器 exec .host/nw
+#   * MixlyServer 是 NW.js(Chromium 154 + Node 24) 桌面壳：启动器 exec .host/nw
 #     加载 mixio-app，MixIO 服务以【同进程】方式内嵌运行
 #     （nw-main.js require mixio.js），前台运行、自行处理 SIGTERM/SIGINT，
 #     不再像旧版 mixio 那样自我 daemon 化。
@@ -40,9 +40,11 @@ LABEL org.opencontainers.image.title="mixly-server-runtime" \
 #   GTK3 / NSS / X11 / ALSA / fontconfig / Mesa(GBM,Drm) 等；
 #   Xvfb 虚拟显示；gosu 降权；tini 信号转发；文泉驿中文字体（GUI 壳中文渲染，
 #   可换字体noto-cjk：fonts-noto-cjk）。
+#   x11-utils 提供 xdpyinfo：NW.js 窗口创建失败时，X 服务器的 visual/扩展
+#   是最常见的环境根因，入口脚本的自动取证会调用它（见 docker-entrypoint.sh）。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        xvfb \
+        xvfb x11-utils \
         libgtk-3-0 libnss3 libnspr4 libasound2 \
         libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
         libcairo2 libcairo-gobject2 libcups2 libdbus-1-3 libexpat1 \

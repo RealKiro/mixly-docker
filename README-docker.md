@@ -111,3 +111,4 @@ bash test/smoke-test.sh ghcr.io/realkiro/mixly-server:v2.0
 - **NTP 仿真不可用**：非 root 无法绑定 UDP 123，仅告警不致命；需要时在 compose 加 `cap_add: [NET_BIND_SERVICE]` 并映射 `123:123/udp`。
 - **烧录时找不到串口**：透传 USB 设备并加 `group_add: [dialout]`，见 [README.md](README.md) 的「烧录硬件」一节。
 - **想看看容器里那个 GUI 窗口**：它在 Xvfb 虚拟显示里，浏览器访问无需它；确有需要可 `docker exec -it <容器> bash` 后自行安装 `x11vnc`/`xterm` 等工具。
+- **容器反复重启、只活几秒、日志有 `XGetWindowAttributes failed for window 0`**：这是 NW.js 窗口层故障（窗口从未创建成功）。v2.1.0 起无需手动诊断——每次短命失败会自动打印「自动取证」日志（端口探针 / MixIO 日志 / xdpyinfo / 最小窗口自检），并自动轮换 4 种启动方式。把 `自动取证开始` 到 `自动取证结束` 之间的日志反馈即可，详见 [README.md](README.md) 的 Q11。

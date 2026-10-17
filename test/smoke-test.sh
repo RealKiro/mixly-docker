@@ -640,4 +640,86 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t16_fail" ] || fail "T16 $t16_fail"
 ok "T16 最小窗口自检模式可用（一次区分镜像依赖问题与 MixSuite 应用层问题）"
 
-echo "🎉 冒烟测试全部通过: $PASS/16"
+echo "=== T17 短命-0 自动取证 + 启动策略轮换（v2.1.0）==="
+# 背景：「数秒退出码 0 + 窗口句柄 0」是 NW.js 窗口层故障签名，根因无法从单次
+# 运行区分。v2.1.0 起入口脚本把重启循环本身变成 A/B 实验：
+#   * 短命-0 失败时自动执行 auto_forensics（端口探针/日志/错误文件/进程/自检），
+#     用户不需要手动 docker exec；
+#   * 计数文件 runtime/boot-attempt 在挂载卷内跨重启保留，每次重启自动切换
+#     一种启动方式（1 官方启动器 → 2/3/4 直连变体 → 轮换）；
+#   * 非短命-0 退出（如 docker stop）重置计数，下次仍从官方启动器开始。
+# 本用例在同一卷上连跑三次验证轮换，再验证 docker stop 后计数重置。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+t17_fail=""
+
+# 第 1 次：短命-0（桩 sleep 2 后 exit 0）→ 策略 1 + 自动取证
+cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
+wait_log "$cid" "下次重启自动切换策略 2/4" 90 || t17_fail="第 1 次未走完短命-0 全流程（策略推进/自动取证）"
+if [ -z "$t17_fail" ]; then
+    log_has "$cid" "启动策略 1/4" || t17_fail="第 1 次未使用策略 1（官方启动器）"
+    log_has "$cid" "自动取证开始" || t17_fail="自动取证缺少起始标记"
+    log_has "$cid" "自动取证结束" || t17_fail="自动取证缺少结束标记"
+    # 自动取证必须覆盖端口探针与最小窗口自检两项关键证据
+    log_has "$cid" "8443 端口探针" || t17_fail="自动取证缺少 8443 端口探针结果"
+    log_has "$cid" "NW.js 最小窗口自检" || t17_fail="自动取证缺少 NW.js 最小窗口自检"
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+
+# 第 2 次：同一卷 → 策略 2（直连，不指定 ozone）
+if [ -z "$t17_fail" ]; then
+    cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "下次重启自动切换策略 3/4" 90 || t17_fail="第 2 次未切换到策略 2 或未走完全流程（计数器未跨重启保留？）"
+    if [ -z "$t17_fail" ]; then
+        log_has "$cid" "启动策略 2/4" || t17_fail="第 2 次未使用策略 2"
+        log_has "$cid" "直连模式" || t17_fail="策略 2 未进入直连模式"
+        # 直连模式必须真的把 .host/nw 拉起来（桩输出 stub-nw-ok）
+        log_has "$cid" "stub-nw-ok" || t17_fail="策略 2 未启动 .host/nw"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+
+# 第 3 次：同一卷 → 策略 3（直连，强制 ozone）
+if [ -z "$t17_fail" ]; then
+    cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "下次重启自动切换策略 4/4" 90 || t17_fail="第 3 次未切换到策略 3"
+    if [ -z "$t17_fail" ]; then
+        log_has "$cid" "启动策略 3/4" || t17_fail="第 3 次未使用策略 3"
+        log_has "$cid" "ozone-platform=x11" || t17_fail="策略 3 未追加 ozone 参数"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+
+# 第 4 次：长命桩 + docker stop → 非短命-0 退出，计数必须重置为 0。
+# 先删计数器模拟「上一次成功运行后的重置状态」，确保本次走官方启动器（策略 1），
+# 否则会接着策略 4（直连）而起，长命桩根本没机会运行。
+if [ -z "$t17_fail" ]; then
+    rm -f "$tmp/mixio-app/runtime/boot-attempt"
+    cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "stub MixlyServer running" 60 || t17_fail="第 4 次桩二进制未被 exec 执行"
+    if [ -z "$t17_fail" ]; then
+        sleep 18
+        docker stop -t 10 "$cid" >/dev/null 2>&1 || true
+        _att=$(cat "$tmp/mixio-app/runtime/boot-attempt" 2>/dev/null | tr -d '[:space:]' || true)
+        [ "$_att" = "0" ] || t17_fail="docker stop 后策略计数未重置（当前值: ${_att:-空}，应为 0）"
+        if [ -z "$t17_fail" ]; then
+            # 优雅停止不应触发窗口层故障的自动取证（避免误导）
+            if log_has "$cid" "自动取证开始"; then
+                t17_fail="docker stop 触发了自动取证（停止信号与窗口层故障未区分）"
+            fi
+        fi
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+
+if [ -n "$t17_fail" ]; then
+    echo "----- 容器日志（末 30 行）-----"
+    docker logs "$cid" 2>&1 | tail -30 || true
+    echo "----- runtime 目录 -----"
+    ls -la "$tmp/mixio-app/runtime" 2>&1 || true
+fi
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t17_fail" ] || fail "T17 $t17_fail"
+ok "T17 短命-0 自动取证、策略 1→2→3 轮换、stop 后计数重置"
+
+echo "🎉 冒烟测试全部通过: $PASS/18"

@@ -179,7 +179,7 @@ v2.0.2 起，容器正常运行时日志里只会剩下**无害噪音**，可对
 | 日志片段 | 性质 |
 |---|---|
 | `dbus/bus.cc: Failed to connect to the bus` / `org.freedesktop.DBus...` | 无害。容器内无 dbus daemon，Chromium 每次启动必报几十行 |
-| `XGetWindowAttributes failed for window 0` | **单独出现时无害**（Xvfb 下的窗口告警）；但若它紧邻「进程数秒内退出 + 退出码 0」，则是窗口层故障的信号，见 Q11 路径 3 |
+| `XGetWindowAttributes failed for window 0` | **单独出现时无害**（Xvfb 下的窗口告警，窗口 ID 非零时是良性噪音）；但若它紧邻「进程数秒内退出 + 退出码 0」，则是窗口层故障的信号——v2.1.0 起会自动取证，见 Q11 路径 3 |
 | 完全没有 `Checking ports` / `Starting NW runtime` / `Loading MixIO service` | 无害。官方启动器父进程的 stdout 在管道下全缓冲，这些进度会随缓冲区丢失，**看不到不代表没执行**；见 Q11 路径 4 |
 | `chrome_crashpad_handler: --database is required` | 无害。崩溃上报组件，NW.js 自带 |
 | `Fontconfig error: No writable cache directories` / `Failed to create .../pki/nssdb` | **v2.0.1 及更早会出现**；v2.0.2 已预建可写的 `.cache` / `.local/share` 与 XDG 目录，升级后消失 |
@@ -212,7 +212,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 | 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | compose 加 `shm_size: '1gb'`、`docker run` 加 `--shm-size=1g`，并留1.5GB+ 内存 |
 | 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；v2.0.6 起会自动打印 `runtime/nw-main-error.log`，多数情况升级到 v2.0.8 即可 |
 | `EACCES: permission denied, mkdir '.../mixio-app/store'` | `mixio-app` 目录本身对 mixly 用户不可写（`chown` 在 virtiofs/NFS 上无效） | 升级到 v2.0.7+；或在宿主机 `chmod -R a+rwX <mixly-app 所在目录>` |
-| 容器**只活几秒**就重启、退出码 0、日志有 `XGetWindowAttributes failed for window 0`，且 `nw-main-error.log` 无新内容 | **NW 壳/窗口层故障**（窗口句柄为 0，从未创建成功），见 Q11 路径 3 | 先用 `-e MIXLY_NW_SELFTEST=1` 区分环境/应用层，再用 `-e MIXLY_DIRECT_NW=1` 取 Chromium 内部日志 |
+| 容器**只活几秒**就重启、退出码 0、日志有 `XGetWindowAttributes failed for window 0`，且 `nw-main-error.log` 无新内容 | **NW 壳/窗口层故障**（窗口句柄为 0，从未创建成功），见 Q11 路径 3 | 升级到 v2.1.0：重启循环会自动取证并轮换启动策略，把 `自动取证开始` 到 `自动取证结束` 之间的日志反馈即可 |
 
 **Q11：容器反复自动重启、退出码 0，`docker logs` 里看不到真实原因**
 
@@ -237,7 +237,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
        at init (/opt/mixly_server/mixio-app/mixio.js:923:12)
    ```
 
-3. **NW 壳 / 窗口层故障：进程只活 2~3 秒**（v2.0.9 新增诊断开关，根待定位）。这是 1、2 都修好之后暴露出来的下一层。日志特征与 1、2 **明显不同**：
+3. **NW 壳 / 窗口层故障：进程只活 2~3 秒**（v2.1.0 起自动取证 + 策略轮换，根因待定位）。这是 1、2 都修好之后暴露出来的下一层。日志特征与 1、2 **明显不同**：
 
    ```
    16:06:40  正在启动 MixlyServer
@@ -255,8 +255,9 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
    | `/dev/shm` 不足 | 那会得到退出码 **139（SIGSEGV）**，不是 0 |
    | 证书问题 | `package.json` 的 `chromium-args` 已含 `--ignore-certificate-errors` |
    | 端口冲突触发 `Continue? [y/N]` | 启动前端口快照显示 8443/18084 等均空闲 |
+   | dbus 报错（`Could not parse server address`） | 容器内无 dbus daemon，libdbus 经 X11 autolaunch 读不到根窗口属性必报此错；Chromium 社区（Gentoo bug 879837）已证实它与进程退出无关 |
 
-   v2.0.8 起入口脚本会打印 `本次存活 Ns` 并按此时长自动分流诊断；v2.0.9 起提供两个专用开关直接取证（见下）。
+   v2.0.8 起入口脚本会打印 `本次存活 Ns` 并按此时长自动分流诊断；**v2.0.9 起提供手动诊断开关，v2.1.0 起全自动取证 + 策略轮换（见下节），不需要执行任何命令**。
 
 4. **官方启动器自身的可观测性缺陷**（v2.0.9 新增旁路模式）。`MixlyServer` 是 `fork` + `execv` 的壳，父进程负责打印 `Checking ports` / `Port conflict detected` / `Starting NW runtime` / `Loading MixIO service` 等进度——但**父进程的 stdout 在管道下是全缓冲的**，容器非 TTY 时这些消息会随缓冲区一起丢失。所以「日志里看不到启动器进度」是正常的，不代表没执行；反之，一旦启动器真的在 `Checking ports` 阶段退出，你同样看不到任何原因。它还有 `Continue? [y/N]` 交互询问，非 TTY 下读 stdin 立即 EOF。
 
@@ -275,13 +276,39 @@ docker run -d --name <容器名> --restart unless-stopped --shm-size=1g \
 docker logs <容器名> 2>&1 | grep -E "已预置|已清理残留 PID 文件"
 ```
 
-### 第 3 条路径的两个专用诊断开关（v2.0.9+）
+### 第 3 条路径：v2.1.0 起全自动取证 + 启动策略轮换
 
-如果升级后仍反复重启，且日志特征是「数秒即退出 + `XGetWindowAttributes failed for window 0`」，用下面两个开关直接取证。两者都不修改官方运行包，只是在容器入口层多走一条路。
+升级到 v2.1.0 后**不需要执行任何诊断命令**。入口脚本会在每次「短命-0」失败时，自动打印一段 `自动取证开始 … 自动取证结束` 的日志：
 
-**① `MIXLY_NW_SELFTEST=1` —— 先判断是环境问题还是应用层问题**
+| 取证项 | 回答的问题 |
+|---|---|
+| 8443 端口探针（1s 间隔，启动即开始） | MixIO 服务到底起没起来过？起来了 = 窗口/渲染层问题；从未起来 = 初始化问题 |
+| `mixio-app/logs` 末 15 行 | MixIO 自己卡在哪一步 |
+| `runtime/nw-main-error.log` | `mixio.js` 顶层加载是否失败（空 = 已加载成功，故障在 NW 壳） |
+| 进程列表 + Xvfb 存活状态 | Xvfb 是否被误杀 |
+| `xdpyinfo`（X 服务器 visual 与扩展） | 窗口建失败时最常见的环境根因（如缺 ARGB visual / RANDR / DAMAGE） |
+| NW.js 最小窗口自检（最小 NW 应用） | 一刀区分「镜像环境问题」与「MixSuite 应用层问题」 |
 
-CI 冒烟测试一直用桩替换 `MixlyServer`，真实 Chromium 从未被验证过，所以「CI 全绿」不等于镜像运行时依赖齐备。自检模式用一个最小 NW 应用（临时 `package.json` + `index.html`）测本容器能否创建窗口并加载页面：
+同时，**重启循环本身变成 A/B 实验**：连续短命失败时，每次重启自动切换一种启动方式，日志里每次都会打印 `启动策略 N/4`：
+
+| 策略 | 启动方式 | 验证的假设 |
+|---|---|---|
+| 1 | 官方启动器（经 `stdbuf` 强制行缓冲，启动器自己的 `Checking ports` / `Port conflict detected` / `MixlyServer exited before becoming ready` 等进度不再丢失） | 基线；同时补上启动器层的可观测性 |
+| 2 | 直连 `.host/nw`，**不指定 ozone**，让 Chromium 自动探测 X11 | 官方强制的 `--ozone-platform=x11` 是否是窗口创建失败的诱因 |
+| 3 | 直连 `.host/nw`，强制 ozone x11（与官方参数一致）+ Chromium 内部日志 | 与 2 对照，隔离 ozone 因素 |
+| 4 | 直连 `.host/nw`，关闭原生窗口遮挡检测（`--disable-features=CalculateNativeWinOcclusion`） | 无窗口管理器环境下，遮挡检测是否干扰窗口生命周期 |
+
+轮换规则：**只有「进程自己短命-0 退出」才推进策略**；`docker stop`、崩溃、超时退出都会把计数重置，下次仍从官方启动器开始。计数文件在挂载卷的 `mixio-app/runtime/boot-attempt` 里，想固定某种方式就手写这个数字（1~4）。
+
+**你要做的只有一件事：把 `自动取证开始` 到 `自动取证结束` 之间的完整日志反馈。**
+
+#### 仍然可用的手动诊断开关（v2.0.9+）
+
+如果希望主动控制而不是等自动轮换，两个开关依然有效（设置后不参与策略轮换）：
+
+**① `MIXLY_NW_SELFTEST=1` —— 只做最小窗口自检然后退出**
+
+用一个最小 NW 应用（临时 `package.json` + `index.html`）测本容器能否创建窗口并加载页面：
 
 ```bash
 docker run --rm -e MIXLY_NW_SELFTEST=1 \
@@ -290,11 +317,11 @@ docker run --rm -e MIXLY_NW_SELFTEST=1 \
 ```
 
 - `✅ 通过` → 镜像依赖齐备，问题在 MixSuite 应用层 → 用开关 ② 继续
-- `❌ 失败` → NW.js/Chromium 在本容器建不了窗口，属镜像依赖问题 → 把完整日志反馈，以便补依赖
+- `❌ 失败` → NW.js/Chromium 在本容器建不了窗口，属镜像依赖问题 → 把完整日志（含 `xdpyinfo` 输出）反馈，以便补依赖
 
-**② `MIXLY_DIRECT_NW=1` —— 绕过官方启动器，打开 Chromium 内部日志**
+**② `MIXLY_DIRECT_NW=1` —— 固定走直连模式，打开 Chromium 内部日志**
 
-直接 `exec .host/nw`（参数与官方启动器完全一致，见入口脚本注释），并追加 `--enable-logging=stderr`，把 Chromium 的窗口创建、GPU 进程、渲染进程等内部状态全部打出来：
+直接 `exec .host/nw`（参数与官方启动器一致），并追加 `--enable-logging=stderr`，把 Chromium 的窗口创建、GPU 进程、渲染进程等内部状态全部打出来：
 
 ```bash
 docker run -d --name mixly-diag -e MIXLY_DIRECT_NW=1 --restart unless-stopped --shm-size=1g \
@@ -307,7 +334,7 @@ docker logs mixly-diag 2>&1 | tail -80
 
 日志里会明确出现窗口为何创建失败（缺 X11 扩展、widget 未初始化等）。找到原因后去掉 `-e MIXLY_DIRECT_NW=1` 即可恢复官方启动器路径。
 
-> 两个开关都是**诊断用**，不作为默认启动方式：官方启动器承担了环境检查与端口冲突处理，绕过它会失去这些保护。
+> 两个开关都是**诊断用**，不作为默认启动方式：官方启动器承担了环境检查与端口冲突处理，绕过它会失去这些保护（策略轮换中的直连变体同理，仅在连续失败时自动启用）。
 
 如果升级后仍反复重启，v2.0.6 起 `runtime/nw-main-error.log` 会被自动打印到 `docker logs`，先看它：
 
@@ -338,6 +365,13 @@ v2.0.6 / v2.0.7 起入口脚本会自动完成以下动作，不必再手工取�
 - 把上一次残留的 `nw-main-error.log` 轮换为 `.prev`，避免旧错误被反复误读为新故障
 - 退出码 0 时打印 `本次存活 Ns` 并按存活时长分流：**<15s 指向窗口层，≥15s 才指向就绪探测超时**
 - 启动前输出端口监听快照与进程列表，便于判断 18084 是否真被占
+
+v2.1.0 起额外自动完成（窗口层故障场景，**无需手动执行任何命令**）：
+
+- 启动时开始 1s 间隔的 8443 端口探针，记录服务首次响应时刻
+- 短命-0 退出时自动执行取证：端口探针结果、`logs` 末 15 行、`nw-main-error.log`、进程与 Xvfb 状态、`xdpyinfo`（X 服务器 visual/扩展）、NW.js 最小窗口自检
+- 经 `stdbuf` 强制行缓冲启动官方启动器，其 `Checking ports` / `Port conflict detected` / `MixlyServer exited before becoming ready` 等进度不再因全缓冲丢失
+- 重启循环自动轮换 4 种启动方式（官方启动器 / 直连无 ozone / 直连 ozone / 直连关闭遮挡检测），计数存于 `mixio-app/runtime/boot-attempt`；`docker stop` 等正常退出自动重置
 
 > **注意**：`docker run` / `docker compose up` 在本地已存在同名 `latest` tag 时**不会**拉取新镜像。升级必须 `docker pull`（compose 用 `docker compose pull`）后**删除旧容器再启动**，否则跑的仍是旧版——旧版与新版的日志文案不同，可用 `docker logs | grep 已预置` 判断当前到底跑的是哪一版。
 
