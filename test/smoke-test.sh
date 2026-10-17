@@ -111,6 +111,40 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t2_fail" ] || fail "T2 $t2_fail"
 ok "T2 校验/chmod/chown/Xvfb/exec 全链路通过（数据目录 uid=$uid，非 root）"
 
+echo "=== T2b chown 无效场景的 chmod 兜底（Docker Desktop/NFS 卷语义）==="
+# Docker Desktop(WSL2/virtiofs)、NFS/CIFS 卷上 chown 静默无效（属主永远 root），
+# 旧逻辑只靠 chown，导致 mixly 写不进 user-data → Chromium 建不了 SingletonLock
+# → 容器反复重启。入口脚本必须用 chmod a+rwX 兜底。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+mkdir -p "$tmp/user-data"
+touch "$tmp/user-data/leftover"          # 预置 root 属主的残留文件
+chmod 755 "$tmp/user-data"               # 预置 other 只读（典型挂载卷语义）
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t2b_fail=""
+wait_log "$cid" "stub MixlyServer running" 60 || t2b_fail="桩二进制未被 exec 执行"
+if [ -z "$t2b_fail" ]; then
+    mode=$(stat -c '%a' "$tmp/user-data")
+    case "$mode" in
+        *2|*3|*6|*7) : ;;
+        *) t2b_fail="user-data 的 other 位仍不可写（mode=$mode），chmod 兜底未生效" ;;
+    esac
+fi
+if [ -z "$t2b_fail" ]; then
+    docker logs "$cid" 2>&1 | grep -q "无法写入.*user-data" \
+        && t2b_fail="入口脚本的写入自检未通过"
+fi
+if [ -n "$t2b_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -20 || true
+    echo "----- 宿主机 user-data 视图 -----"
+    ls -la "$tmp/user-data" 2>&1 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t2b_fail" ] || fail "T2b $t2b_fail"
+ok "T2b 预置 root 属主 user-data 时 chmod 兜底生效，容器正常启动"
+
 echo "=== T3 架构不匹配（x86_64 机器 + arm64 桩）==="
 tmp=$(mktemp -d)
 make_pkg "$tmp" arm64

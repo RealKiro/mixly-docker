@@ -135,7 +135,12 @@ if [ "$(id -u)" = "0" ]; then
     for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
               "$APP_DIR/runtime" "$SERVER_DIR/user-data"; do
         mkdir -p "$_d"
-        chown -R mixly:mixly "$_d"
+        # chown 在 Docker Desktop(WSL2/virtiofs)、NFS/CIFS 等卷上可能静默无效
+        # （属主永远呈现为 root），因此不能只靠 chown：权限位必须兜底。
+        chown -R mixly:mixly "$_d" 2>/dev/null || true
+        # a+rwX：所有用户可读写，目录加执行位。遍历时不跟随符号链接，
+        # 不会误改 user-data 里 Chromium 遗留 SingletonLock 指向的目标。
+        chmod -R a+rwX "$_d"
     done
     # mixio-app 本身（非递归）：应用可能在此写 pid.info 等文件。
     # 不碰 $SERVER_DIR（挂载根目录）——见上面的警告。
@@ -162,6 +167,27 @@ if [ "$(id -u)" = "0" ]; then
     # gosu 不改 HOME；Chromium/NW 的 crashpad、fontconfig 等组件需要可写的 HOME
     export HOME="/tmp/mixly-home"
     mkdir -p "$HOME" && chown mixly:mixly "$HOME"
+
+    # 清理上次异常退出可能残留的 ProcessSingleton 文件（属主/权限不对时
+    # Chromium 连 unlink 旧 lock 都做不到，会一直报 Permission denied）。
+    rm -f "$SERVER_DIR/user-data/SingletonLock" \
+          "$SERVER_DIR/user-data/SingletonSocket" \
+          "$SERVER_DIR/user-data/SingletonCookie" 2>/dev/null || true
+
+    # 实测 mixly 对 user-data 的写入能力：Chromium 启动时要在 profile 里建
+    # SingletonLock，写不进去会直接 Abort（表现为容器反复重启、
+    # "Failed to create ... SingletonLock: Permission denied"）。
+    # chown 在 Docker Desktop(WSL2/virtiofs)/NFS/CIFS 卷上静默无效，
+    # 仅靠 chmod a+rwX 兜底，这里必须真验一次，把问题暴露在启动阶段。
+    if ! gosu mixly:mixly sh -c "touch '$SERVER_DIR/user-data/.entrypoint-write-test'" 2>/dev/null; then
+        echo "[entrypoint][ERROR] mixly 用户无法写入 $SERVER_DIR/user-data" >&2
+        echo "[entrypoint][ERROR] Chromium 将无法创建 SingletonLock，容器会反复重启。" >&2
+        ls -ld "$SERVER_DIR" "$SERVER_DIR/user-data" >&2 || true
+        echo "[entrypoint][ERROR] 若 Docker 跑在 Windows/macOS Desktop 或 NFS 卷上，" >&2
+        echo "[entrypoint][ERROR] 属主语义不受支持，请确认使用 v2.0.1+ 镜像（chmod 兜底）。" >&2
+        exit 1
+    fi
+    rm -f "$SERVER_DIR/user-data/.entrypoint-write-test" 2>/dev/null || true
 
     # 保证降权后的 mixly 用户能进入套件根目录：mktemp 或严格 umask 解压出来的
     # 根目录可能是 700（属主是宿主机用户），root 能进但 mixly 不能，二次执行时
