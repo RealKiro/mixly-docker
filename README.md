@@ -71,6 +71,7 @@
 | 入口 | 地址 | 说明 |
 |---|---|---|
 | MixIO / Mixly 主界面 | `https://NAS_IP:8443` | MixSuite 强制 HTTPS；自签证书提示"连接不是专用连接"时点**高级 → 继续访问** |
+| MixMO（手机 App 设计） | `https://NAS_IP:8443/mixmo` | 需运行包内含 `mixmo/` 目录（官方 MixSuite 2026-10-15 起内置），入口见下方说明 |
 | 管理模式 | `https://NAS_IP:18084` | 数据管理、用户导入、在线更新 |
 | MQTT | `NAS_IP:1883` | 设备接入 |
 | WebSocket MQTT | `NAS_IP:8083 / 8084` | 明文 / 加密 |
@@ -80,6 +81,21 @@
 - 管理员默认 `admin/public`，**上线后务必在 `mixio-app/config/config.json` 中修改 `ADMIN_PASSWORD`**；离线内网可保留 `ALLOW_REGISTER`。如需外网访问，在 DSM 控制面板做端口映射或用 DSM 反向代理套 443。
 - Mixly 界面内按 **CTRL+SHIFT+M** 可随时调出管理后台。
 
+#### MixSuite 产品矩阵（官方 2026-10-15 包）
+
+官方已把多个产品统一进 MixSuite 压缩包，**解压即用**（都是套件根目录下与 `mixio-app/` 同级的旁路目录，MixIO 按请求动态挂载、无需重启）：
+
+| 产品 | 目录 | 入口 | 官方包 |
+|---|---|---|---|
+| Mixly 图文编程 | `mixly/` | `https://NAS_IP:8443/mixly` | MixSuite 内置 |
+| MixIO 平台（本服务主体） | `mixio-app/` | `https://NAS_IP:8443` | MixSuite 内置 |
+| MixCO 自学课程 | `mixco/` | `https://NAS_IP:8443/mixco` | MixSuite 内置 |
+| **MixMO 手机 App 设计** | `mixmo/` | `https://NAS_IP:8443/mixmo` | MixSuite 内置（2026-10-15 起） |
+| MixAI 交互体验 | `mixai/` | `https://NAS_IP:8443/mixai` | **单独下载**，解压后放进套件根目录（官方说明：包比较大，需单独下载解压放进去） |
+| MixNT 网络仿真 | `mixnt/` 或 `mixly/mixvm/mixnt/` | `https://NAS_IP:8443/mixnt` | 随 Mixly/MixCO 包内嵌或单独放置 |
+
+> **MixMO 说明（v2.3.0 起）**：官方 2026-10-15 版的桌面壳菜单和 18084 管理端已接入 MixMO，但服务端 `mixio.js` 尚未挂载 `/mixmo` 路由、首页也不显示入口（官方模板已留防御式代码，等服务端版本补齐）。本镜像的入口脚本会**自动给卷内 `mixio.js` 打幂等补丁**（备份 `mixio.js.mixly-docker-orig`，插入块带 `MIXLY_DOCKER_MIXMO_PATCH` 标记；官方在线更新覆盖 `mixio.js` 后下次启动自动重打），补上 `/mixmo` 静态挂载与首页入口。卷里没有 `mixmo/` 时 `/mixmo` 自然返回 404、无副作用；把 `mixmo/` 放进卷后也**无需重启容器**。
+
 ## 从 v1.x（mixly_server）迁移
 
 1. **备份**：复制原映射目录下的 `mixio/storage` 文件夹（SQLite 数据）。
@@ -87,6 +103,33 @@
 3. **带数据升级**（保留用户/项目）：旧数据在 `mixio/storage`，新位置是 `mixio-app/storage`——把旧 `mixio/storage` 里的内容复制到新的 `mixio-app/storage/`，再启动。
 4. **端口变化**：管理/访问入口从 `http://8080` 改为 `https://8443`（HTTP 官方已关闭）；若用了反向代理或端口映射，记得改。
 5. 升级镜像本身不丢数据（数据全在映射目录里），但**升级 MixSuite 运行包前建议先停容器**。
+
+## 升级 MixSuite 运行包（保留用户数据）
+
+官方 MixSuite 更新较快（例如 2026-10-15 版才内置 `mixmo/`），换包时**只覆盖程序文件、保留数据目录**：
+
+```bash
+# 1) 停容器
+docker rm -f <你的容器名>
+
+# 2) 备份数据目录（SQLite 用户/项目、证书、配置都在这里）
+cp -a <映射路径>/mixio-app/storage <映射路径>/mixio-app/storage.bak
+cp -a <映射路径>/mixio-app/config  <映射路径>/mixio-app/config.bak
+
+# 3) 解压新包到临时目录，覆盖程序文件，但【不要】动 storage / config / logs / runtime
+#    （以 Linux 为例；Windows 下用资源管理器同样只复制除上述目录外的内容）
+cd <映射路径>
+unzip -o ~/Downloads/MixSuite-linux-x64.zip -d /tmp/mixnew
+cp -a /tmp/mixnew/MixSuite-linux-x64/. <映射路径>/
+# 然后把备份的 storage/config 放回（若上一步被覆盖）：
+# rm -rf <映射路径>/mixio-app/storage && mv <映射路径>/mixio-app/storage.bak <映射路径>/mixio-app/storage
+
+# 4) 按原有方式重新启动容器
+```
+
+- 想用 **MixAI**：从官方渠道单独下载 MixlyAI 包，解压后把 `mixai/` 放进套件根目录（与 `mixio-app/` 同级）即可，**无需重启**，首页会自动出现入口。
+- 想用 **MixMO**：确认套件根目录有 `mixmo/`（2026-10-15 起官方包内置），访问 `https://NAS_IP:8443/mixmo`。
+- 入口脚本每次启动都会重新校验 `mixio.js` 的补丁标记，官方在线更新覆盖后自动重打，无需手工干预。
 
 ## 本地构建（不用 GitHub Actions）
 
@@ -377,6 +420,11 @@ v2.1.0 起额外自动完成（窗口层故障场景，**无需手动执行任�
 - 短命-0 退出时自动执行取证：端口探针结果、`logs` 末 15 行、`nw-main-error.log`、进程与 Xvfb 状态、`xdpyinfo`（X 服务器 visual/扩展）、NW.js 最小窗口自检
 - 经 `stdbuf` 强制行缓冲启动官方启动器，其 `Checking ports` / `Port conflict detected` / `MixlyServer exited before becoming ready` 等进度不再因全缓冲丢失
 - 重启循环自动轮换 4 种启动方式，计数存于 `mixio-app/runtime/boot-attempt`；`docker stop` 等正常退出自动重置
+
+v2.3.0 起额外自动完成（MixMO 场景，**无需手动执行任何命令**）：
+
+- 每次启动幂等 patch 卷内 `mixio.js`：补 `/mixmo` 静态挂载（官方 10-15 包内置 `mixmo/` 但服务端未挂载）与首页入口参数；首次 patch 前备份 `mixio.js.mixly-docker-orig`，官方在线更新覆盖后自动重打
+- 卷内无 `mixmo/` 时 `/mixmo` 自然 404、不显示首页入口；放入 `mixmo/` 后无需重启即生效
 
 v2.2.0 起（根因已定位后的收尾）：
 

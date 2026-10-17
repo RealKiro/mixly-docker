@@ -115,6 +115,150 @@ EOF
     log "运行包架构校验通过: $BIN_ARCH（机器: $HOST_ARCH）"
 fi
 
+[ -d "$SERVER_DIR/mixmo" ] || warn "未发现 mixmo/ 目录：MixMO（手机 App 设计）不可用。官方 MixSuite 压缩包内已内置，重新解压即可获得。"
+
+# ------------------------------------------------ MixMO 托管补丁（mixmo 旁路）
+# 背景：官方 MixSuite 2026-10-15 起在压缩包内内置 mixmo/（MixMO · 手机 App
+# 设计 PWA，含 APK 导出壳），桌面壳 nw-bg.js 托盘菜单、18084 管理端
+# （版本显示 + 在线更新）都已接入 MixMO，但服务端 mixio.js 尚未挂载
+# /mixmo 路由、首页 ejs 也不传 mixmo 参数（模板 index.ejs 里有防御式
+# `typeof mixmo !== 'undefined'`——壳侧就绪、等服务端补齐）。
+# 结果：托盘菜单项、手输 https://<ip>:8443/mixmo 都得到 404。
+#
+# 对策：入口幂等 patch 卷内 mixio.js（首次 patch 前备份 .mixly-docker-orig）：
+#   1) 主 app(8443) 追加 /mixmo 静态挂载。按请求 existsSync：卷里没有
+#      mixmo/ 时自然 404、无副作用；事后把 mixmo/ 放进卷也无需重启容器；
+#   2) 首页 app.get('/') 的 ejs 传参补 mixmo / mixmoHref（同样按存在性
+#      判定：没有 mixmo 就不显示入口，不改动官方首页的既有行为）。
+# 发布根优先取 nw-main.js 设置的 MIXIO_SIDECAR_ROOT，兜底 mixio-app 的
+# 上一级目录（MixSuite 解压布局下即套件根，与旁路 mixly/mixco 同级）。
+#
+# patch 特征：插入块均带 MIXLY_DOCKER_MIXMO_PATCH 标记，已打则跳过；
+# 官方在线更新会覆盖 mixio.js（标记随之丢失），下次启动自动重打。
+patch_mixmo_support() {
+    _mj="$APP_DIR/mixio.js"
+    if [ ! -f "$_mj" ]; then
+        warn "MixMO 补丁：未找到 $_mj，跳过（官方运行包不完整？）"
+        return 0
+    fi
+    if grep -q "MIXLY_DOCKER_MIXMO_PATCH" "$_mj" 2>/dev/null; then
+        return 0
+    fi
+
+    # 首次 patch 前备份原件（已备份过则不覆盖，保留更早的原始版本）
+    if [ ! -f "$_mj.mixly-docker-orig" ]; then
+        if cp "$_mj" "$_mj.mixly-docker-orig" 2>/dev/null; then
+            log "MixMO 补丁：已备份原始 mixio.js → mixio.js.mixly-docker-orig"
+        else
+            warn "MixMO 补丁：备份 mixio.js 失败（不影响补丁本身）"
+        fi
+    fi
+
+    _rt="$APP_DIR/runtime"
+    mkdir -p "$_rt" 2>/dev/null || true
+
+    # --- 片段 1：/mixmo 静态挂载（插到旁路挂载锚点行之前） ---
+    cat > "$_rt/mixmo-route.patch.js" <<'PATCH_EOF'
+
+// [MIXLY_DOCKER_MIXMO_PATCH] MixMO 静态托管（官方 10-15 起包内内置 mixmo/，
+// 壳菜单/管理端已接入，服务端未挂载；由 mixly-docker 入口脚本补齐）
+app.use('/mixmo', function (req, res, next) {
+    try {
+        var __mixmoRoot = process.env.MIXIO_SIDECAR_ROOT || path.resolve(__dirname, '..');
+        var __mixmoPath = path.join(__mixmoRoot, 'mixmo');
+        if (fs.existsSync(path.join(__mixmoPath, 'index.html'))) {
+            return express.static(__mixmoPath)(req, res, next);
+        }
+    } catch (_eMixmo) {}
+    next();
+});
+PATCH_EOF
+
+    # --- 片段 2：首页 ejs 传参（插到首页传参锚点行之后，缩进随锚点行） ---
+    cat > "$_rt/mixmo-index.patch.js" <<'PATCH_EOF'
+// [MIXLY_DOCKER_MIXMO_PATCH] 首页 MixMO 入口（index.ejs 有防御式 typeof 判断）
+'mixmo': (function () { try { var __r = process.env.MIXIO_SIDECAR_ROOT || path.resolve(__dirname, '..'); return fs.existsSync(path.join(__r, 'mixmo', 'index.html')); } catch (_e) { return false; } })(),
+'mixmoHref': '/mixmo',
+PATCH_EOF
+
+    _route_anchor=""
+    for _a in "app.use('/mixnt', function" "app.use('/mixco', function" \
+              "app.use('/mixai', function" "app.use('/mixly', function" \
+              "app.use('/documentation'"; do
+        if grep -qF "$_a" "$_mj" 2>/dev/null; then
+            _route_anchor="$_a"
+            break
+        fi
+    done
+
+    _index_anchor=""
+    for _a in "'mixntHref': mixntHref || '/mixnt'," \
+              "'mixcoHref': mixcoHref || '/mixco'," \
+              "'mixaiHref': mixaiHref || '/mixai'," \
+              "'mixlyHref': mixlyHref || '/mixly'," \
+              "'configs': configs"; do
+        if grep -qF "$_a" "$_mj" 2>/dev/null; then
+            _index_anchor="$_a"
+            break
+        fi
+    done
+
+    if [ -z "$_route_anchor" ]; then
+        warn "MixMO 补丁：mixio.js 中未找到旁路挂载锚点（app.use('/mixnt' 等），"
+        warn "可能为未知版本；已跳过 /mixmo 路由补丁（不影响其它功能）"
+    else
+        _ln=$(grep -nF "$_route_anchor" "$_mj" | head -1 | cut -d: -f1)
+        _ind=$(sed -n "${_ln}p" "$_mj" | awk '{ match($0, /^ */); print substr($0, 1, RLENGTH) }')
+        # 锚点行【之前】插入路由片段（中间件顺序对 /mixmo 无影响）
+        {
+            head -n $((_ln - 1)) "$_mj"
+            while IFS= read -r _l || [ -n "$_l" ]; do
+                printf '%s%s\n' "$_ind" "$_l"
+            done < "$_rt/mixmo-route.patch.js"
+            tail -n +"$_ln" "$_mj"
+        } > "$_rt/mixio.js.patched" 2>/dev/null
+        if [ -s "$_rt/mixio.js.patched" ]; then
+            cat "$_rt/mixio.js.patched" > "$_mj" 2>/dev/null \
+                && log "MixMO 补丁：/mixmo 静态挂载已插入（锚点: ${_route_anchor}）" \
+                || warn "MixMO 补丁：写入 /mixmo 挂载失败（mixio.js 不可写？）"
+        else
+            warn "MixMO 补丁：生成 patched 文件失败，已跳过 /mixmo 路由补丁"
+        fi
+    fi
+
+    if [ -z "$_index_anchor" ]; then
+        warn "MixMO 补丁：mixio.js 中未找到首页传参锚点（mixlyHref 等），跳过首页入口补丁"
+    else
+        _ln=$(grep -nF "$_index_anchor" "$_mj" | head -1 | cut -d: -f1)
+        _ind=$(sed -n "${_ln}p" "$_mj" | awk '{ match($0, /^ */); print substr($0, 1, RLENGTH) }')
+        # 锚点行【之后】插入传参片段，缩进与锚点行对齐
+        {
+            head -n "$_ln" "$_mj"
+            while IFS= read -r _l || [ -n "$_l" ]; do
+                printf '%s%s\n' "$_ind" "$_l"
+            done < "$_rt/mixmo-index.patch.js"
+            tail -n +$((_ln + 1)) "$_mj"
+        } > "$_rt/mixio.js.patched" 2>/dev/null
+        if [ -s "$_rt/mixio.js.patched" ]; then
+            cat "$_rt/mixio.js.patched" > "$_mj" 2>/dev/null \
+                && log "MixMO 补丁：首页 MixMO 入口参数已插入（锚点: ${_index_anchor}）" \
+                || warn "MixMO 补丁：写入首页传参失败（mixio.js 不可写？）"
+        else
+            warn "MixMO 补丁：生成 patched 文件失败，已跳过首页入口补丁"
+        fi
+    fi
+
+    rm -f "$_rt/mixio.js.patched" "$_rt/mixmo-route.patch.js" "$_rt/mixmo-index.patch.js" 2>/dev/null || true
+
+    _n=$(grep -c "MIXLY_DOCKER_MIXMO_PATCH" "$_mj" 2>/dev/null) || _n=0
+    [ -n "$_n" ] || _n=0
+    if [ "$_n" -ge 2 ]; then
+        log "MixMO 托管补丁完成：https://<本机IP>:8443/mixmo（卷内无 mixmo/ 时为 404，放入后无需重启）"
+    else
+        warn "MixMO 补丁未完整生效（标记数: $_n，期望 2）；MixMO 可能仍无法访问"
+    fi
+}
+
 # ---------------------------------------------------------------- root 准备
 # X11 socket 目录（root 与 --user 两种方式都需要；非 root 时 /tmp 可写也能建）
 mkdir -p /tmp/.X11-unix 2>/dev/null || true
@@ -230,6 +374,10 @@ if [ "$(id -u)" = "0" ]; then
         # 已存在且合法：同样补一次权限位（可能是上一次以 root 身份写的）
         chmod a+rw "$RESERVE_DIR/filter.json" 2>/dev/null || true
     fi
+
+    # MixMO 托管补丁：root 上下文执行（保证对卷内 mixio.js 可写）。
+    # 幂等：已打过（带 MIXLY_DOCKER_MIXMO_PATCH 标记）则直接返回。
+    patch_mixmo_support
 
     # zip 解压后常丢失执行位；firstrun.sh 亦要求对这三个文件 chmod +x
     chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" \
@@ -440,6 +588,10 @@ log "当前进程: $(ps -o pid,ppid,comm -e 2>/dev/null | head -12 | sed 's/^/[e
 
 log "正在启动 MixlyServer（MixIO 服务将在 NW.js 进程内运行）..."
 log "访问入口: https://<本机IP>:8443（HTTPS，自签证书）/ 管理: https://<本机IP>:18084"
+
+# MixMO 托管补丁的幂等兜底：root 段已打过；这里覆盖 --user 非 root 启动
+# （root 段没执行到）的场景。已打则直接返回，不产生额外输出。
+patch_mixmo_support
 
 # ------------------------------------------- NW.js 调用参数（与官方启动器一致）
 # 从官方 MixlyServer 二进制里提取到的真实调用形式（见其字符串表）：

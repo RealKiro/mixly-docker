@@ -732,4 +732,95 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t17_fail" ] || fail "T17 $t17_fail"
 ok "T17 短命-0 自动取证、策略 1→2→3 轮换、stop 后计数重置"
 
-echo "🎉 冒烟测试全部通过: $PASS/18"
+echo "=== T18 MixMO 托管补丁（mixmo 旁路，幂等 patch mixio.js）==="
+# 背景：官方 MixSuite 2026-10-15 起包内内置 mixmo/（MixMO · 手机 App 设计），
+# 壳菜单/管理端已接入，但服务端 mixio.js 未挂载 /mixmo、首页不传 mixmo 参数。
+# 入口脚本 patch_mixmo_support 幂等补齐两处（路由 + 首页传参），锚点链兼容
+# 新旧版 mixio.js。本用例锁定：patch 插入、备份、幂等（重启不重复打）、
+# 无 mixmo 目录时只告警不阻断。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+t18_fail=""
+
+# 覆盖为含锚点的桩 mixio.js（模拟真实版结构：旁路挂载 + 首页 ejs 传参）
+cat > "$tmp/mixio-app/mixio.js" <<'STUB_MIXIO'
+var fs = require('fs');
+const path = require('path');
+var express = require('express');
+var app = express();
+app.use('/js', express.static(path.join(__dirname, 'js')));
+app.use('/mixnt', function (req, res, next) { next(); });
+app.get('/', function(req, res) {
+    ejs.renderFile(__dirname + '/ejs/index.ejs', {
+        'footer': configs["FOOTER"],
+        'mixlyHref': mixlyHref || '/mixly',
+        'configs': configs
+    }, function(err, data) { res.send(data) })
+});
+STUB_MIXIO
+mkdir -p "$tmp/mixmo"
+echo '<!doctype html><title>MixMO</title>' > "$tmp/mixmo/index.html"
+
+# 第 1 次：patch 应完整生效（固定策略 2 走官方启动器，与其余用例一致）
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
+wait_log "$cid" "stub MixlyServer running" 60 || t18_fail="桩二进制未被 exec 执行（patch 在启动前，应先于本行完成）"
+if [ -z "$t18_fail" ]; then
+    log_has "$cid" "MixMO 补丁：/mixmo 静态挂载已插入" || t18_fail="未见 /mixmo 路由补丁日志"
+    log_has "$cid" "首页 MixMO 入口参数已插入" || t18_fail="未见首页传参补丁日志"
+    log_has "$cid" "MixMO 托管补丁完成" || t18_fail="未见补丁完成汇总日志"
+    log_has "$cid" "未发现 mixmo/" && t18_fail="有 mixmo/ 却打印了缺失警告"
+    # 卷内文件断言：标记、路由、首页传参、备份
+    grep -q "MIXLY_DOCKER_MIXMO_PATCH" "$tmp/mixio-app/mixio.js" 2>/dev/null \
+        || t18_fail="mixio.js 缺 MIXLY_DOCKER_MIXMO_PATCH 标记"
+    grep -q "app.use('/mixmo', function" "$tmp/mixio-app/mixio.js" 2>/dev/null \
+        || t18_fail="mixio.js 缺 /mixmo 静态挂载"
+    grep -q "'mixmoHref': '/mixmo'," "$tmp/mixio-app/mixio.js" 2>/dev/null \
+        || t18_fail="mixio.js 缺首页 mixmoHref 传参"
+    [ -f "$tmp/mixio-app/mixio.js.mixly-docker-orig" ] \
+        || t18_fail="缺原始 mixio.js 备份（.mixly-docker-orig）"
+    grep -q "stub mixio.js\|var app = express" "$tmp/mixio-app/mixio.js.mixly-docker-orig" 2>/dev/null \
+        || t18_fail="备份内容不是原始桩"
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+
+# 第 2 次：同一卷重启 → 幂等（不得重复插入，文件内容不变）
+if [ -z "$t18_fail" ]; then
+    _md5_before=$(md5sum "$tmp/mixio-app/mixio.js" 2>/dev/null | cut -d' ' -f1)
+    cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "stub MixlyServer running" 60 || t18_fail="第 2 次桩未被 exec"
+    if [ -z "$t18_fail" ]; then
+        if log_has "$cid" "静态挂载已插入"; then
+            t18_fail="重启后重复执行了路由补丁（幂等失效）"
+        fi
+        _md5_after=$(md5sum "$tmp/mixio-app/mixio.js" 2>/dev/null | cut -d' ' -f1)
+        [ "$_md5_before" = "$_md5_after" ] || t18_fail="重启后 mixio.js 被改动（幂等失效）"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+
+# 第 3 次：无 mixmo/ 目录 → 只告警，patch 与启动照常
+# （mixio.js 已打过补丁，本次仅验证「缺 mixmo 不阻断、警告照打、路由补丁仍在」）
+if [ -z "$t18_fail" ]; then
+    rm -rf "$tmp/mixmo"
+    cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "stub MixlyServer running" 60 || t18_fail="第 3 次桩未被 exec（缺 mixmo 不应阻断启动）"
+    if [ -z "$t18_fail" ]; then
+        log_has "$cid" "未发现 mixmo/ 目录" || t18_fail="缺 mixmo/ 时未打印缺失警告"
+        # 路由补丁仍应在（运行时 existsSync 自然 404，无副作用）
+        grep -q "app.use('/mixmo', function" "$tmp/mixio-app/mixio.js" 2>/dev/null \
+            || t18_fail="无 mixmo/ 时 /mixmo 路由补丁缺失（应按存在性动态判定）"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+
+if [ -n "$t18_fail" ]; then
+    echo "----- 容器日志（末 25 行）----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+    echo "----- mixio.js 补丁区 -----"
+    grep -n "MIXLY_DOCKER_MIXMO_PATCH" "$tmp/mixio-app/mixio.js" 2>&1 | head -6 || true
+fi
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t18_fail" ] || fail "T18 $t18_fail"
+ok "T18 MixMO 补丁插入、备份、重启幂等、缺 mixmo 仅告警"
+
+echo "🎉 冒烟测试全部通过: $PASS/19"

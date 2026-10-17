@@ -22,7 +22,7 @@ MixSuite-linux-x64/
 │   └── runtime/         #   运行时目录
 ├── mixly/               # Mixly 编辑器静态资源（服务以 /mixly 托管）
 ├── mixco/               # 课程静态资源（loong64 包无此目录，可选）
-└── mixmo/               # MixMO 静态资源（可选）
+└── mixmo/               # MixMO 静态资源（2026-10-15 起官方包内置；v2.3.0 镜像自动补 /mixmo 路由）
 ```
 
 由此带来的关键行为变化：
@@ -61,7 +61,8 @@ MixSuite-linux-x64/
 
 启动成功后浏览器访问：
 
-- `https://NAS_IP:8443` —— MixIO/Mixly 主界面（左下角可进 Mixly / MixMO；自签证书点"高级 → 继续访问"）
+- `https://NAS_IP:8443` —— MixIO/Mixly 主界面（首页可进 Mixly / MixCO / MixMO / MixNT；自签证书点"高级 → 继续访问"）
+- `https://NAS_IP:8443/mixmo` —— MixMO 手机 App 设计（需运行包含 `mixmo/` 的新版官方包，v2.3.0 起自动启用）
 - `https://NAS_IP:18084` —— 管理模式（数据管理、用户导入、手动更新 Mixly/MixIO）
 
 管理员默认 `admin/public`，**上线后务必修改** `mixio-app/config/config.json` 中的 `ADMIN_PASSWORD`；离线内网可保留 `ALLOW_REGISTER`。如需外网访问，在 DSM 控制面板做端口映射或用 DSM 反向代理套 443。
@@ -112,3 +113,4 @@ bash test/smoke-test.sh ghcr.io/realkiro/mixly-server:v2.0
 - **烧录时找不到串口**：透传 USB 设备并加 `group_add: [dialout]`，见 [README.md](README.md) 的「烧录硬件」一节。
 - **想看看容器里那个 GUI 窗口**：它在 Xvfb 虚拟显示里，浏览器访问无需它；确有需要可 `docker exec -it <容器> bash` 后自行安装 `x11vnc`/`xterm` 等工具。
 - **容器反复重启、只活几秒、日志有 `XGetWindowAttributes failed for window 0`**：这是 NW.js 窗口层故障（窗口从未创建成功）。v2.1.0 已定位根因——官方启动器传给 `.host/nw` 的 `--ozone-platform=x11` 在 Xvfb 下建不了窗口；**v2.2.0 起默认启动方式已避开该参数（直连 `.host/nw`，不指定 ozone）**，升级后即恢复正常。万一环境不同，重启循环会自动取证（端口探针 / MixIO 日志 / xdpyinfo / 双探针窗口自检）并轮换 4 种启动方式，把 `自动取证开始` 到 `自动取证结束` 之间的日志反馈即可，详见 [README.md](README.md) 的 Q11。
+- **MixMO（手机 App 设计）怎么进**：官方 MixSuite 2026-10-15 起的压缩包已内置 `mixmo/`（与 `mixly/`、`mixco/` 同级，解压即用；MixlyAI 包较大，需单独下载解压后放入套件根目录）。该版本官方桌面壳菜单和管理端已接入 MixMO，但服务端 `mixio.js` 还没挂 `/mixmo` 路由——**本镜像 v2.3.0 起入口脚本会自动给卷内 `mixio.js` 打幂等补丁**（首次前备份 `mixio.js.mixly-docker-orig`；官方在线更新覆盖后自动重打），补上 `/mixmo` 静态挂载和首页入口，直接访问 `https://<IP>:8443/mixmo` 即可。详见 [README.md](README.md) 的产品矩阵一节。
