@@ -124,18 +124,22 @@ chmod 1777 /tmp/.X11-unix 2>/dev/null || true
 # 然后用 gosu 降权重新执行本脚本（之后 id -u != 0，跳过本段）。
 if [ "$(id -u)" = "0" ]; then
     # MixSuite 的可写位置：mixio-app/{storage,logs,config,runtime}（服务数据）、
-    # mixio-app 与套件根目录本身（pid.info / user-data / config 重建）。
-    # .host、mixly、mixco、mixmo 等静态大目录保持 root 只读，不做递归 chown。
+    # mixio-app 本身（pid.info 等散落文件）、套件根目录下的 user-data（Chromium profile）。
+    # .host、mixly、mixco、mixmo 等静态大目录保持只读，不做递归 chown。
+    #
+    # 切记不要 chown 挂载根目录 $SERVER_DIR 本身：解压 / mktemp 出来的根目录
+    # 常见 mode 700，属主一旦改成 mixly，宿主机用户会立刻失去访问权限，
+    # 表现为「宿主机看不到容器里明明已创建的目录」。
     MIXLY_UID=$(id -u mixly)
     log "root: 开始准备数据目录（套件根=$SERVER_DIR, mixly uid=$MIXLY_UID）"
-    for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" "$APP_DIR/runtime"; do
+    for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
+              "$APP_DIR/runtime" "$SERVER_DIR/user-data"; do
         mkdir -p "$_d"
-        [ "$(stat -c '%u' "$_d" 2>/dev/null)" = "$MIXLY_UID" ] || chown -R mixly:mixly "$_d"
+        chown -R mixly:mixly "$_d"
     done
-    mkdir -p "$SERVER_DIR/user-data"
-    [ "$(stat -c '%u' "$SERVER_DIR/user-data" 2>/dev/null)" = "$MIXLY_UID" ] \
-        || chown -R mixly:mixly "$SERVER_DIR/user-data"
-    chown mixly:mixly "$SERVER_DIR" "$APP_DIR"
+    # mixio-app 本身（非递归）：应用可能在此写 pid.info 等文件。
+    # 不碰 $SERVER_DIR（挂载根目录）——见上面的警告。
+    chown mixly:mixly "$APP_DIR"
 
     # 自检：五个可写目录必须都存在。缺任何一个都直接报错退出，
     # 把问题暴露在启动阶段，而不是留到后面出现诡异症状。

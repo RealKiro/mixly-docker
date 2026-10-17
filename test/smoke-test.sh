@@ -69,16 +69,27 @@ if [ -z "$t2_fail" ]; then
     echo "$c_logs" | grep -q "Xvfb 虚拟显示已就绪" || t2_fail="Xvfb 未就绪"
 fi
 if [ -z "$t2_fail" ]; then
+    # 回归检查：宿主机必须仍能访问挂载源。入口脚本若 chown 挂载根目录
+    # （解压/mktemp 出来的根目录常见 mode 700），会把宿主用户锁在外面，
+    # 导致下面所有 -d 检查因 EACCES 而失败（曾真实发生过）。
+    if [ ! -r "$tmp" ] || [ ! -x "$tmp" ]; then
+        t2_fail="宿主机已无法访问挂载源 $tmp（入口脚本错误地 chown 了挂载根目录？）"
+    fi
+fi
+if [ -z "$t2_fail" ]; then
     for d in storage logs config runtime; do
-        [ -d "$tmp/mixio-app/$d" ] || t2_fail="未创建数据目录 mixio-app/$d"
-    done
-    if [ ! -d "$tmp/user-data" ]; then
-        # 目录名混入回车符（脚本被 CRLF 污染）时肉眼不可见，单独给出明确报错
-        if [ -d "$tmp/user-data"$'\r' ]; then
-            t2_fail="user-data 目录名混入了回车符（脚本被 CRLF 污染）"
-        else
-            t2_fail="未创建 user-data 目录"
+        if [ ! -d "$tmp/mixio-app/$d" ]; then
+            t2_fail="未创建数据目录 mixio-app/$d"
+            break
         fi
+    done
+fi
+if [ -z "$t2_fail" ] && [ ! -d "$tmp/user-data" ]; then
+    # 目录名混入回车符（脚本被 CRLF 污染）时肉眼不可见，单独给出明确报错
+    if [ -d "$tmp/user-data"$'\r' ]; then
+        t2_fail="user-data 目录名混入了回车符（脚本被 CRLF 污染）"
+    else
+        t2_fail="未创建 user-data 目录"
     fi
 fi
 if [ -z "$t2_fail" ]; then
