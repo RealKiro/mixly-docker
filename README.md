@@ -159,6 +159,12 @@ NW.js 图形壳跑在 Xvfb 虚拟显示上（`:99`），服务本身不依赖它
 
 确认下载的是 `MixSuite-linux-loong64.zip` 运行包，且镜像 tag 为 v2.0 及以上（多架构 manifest 已含 loong64）；容器启动时入口脚本会校验 `.host/nw` 的 ELF 架构，下错包会给出明确提示。
 
+**Q8：容器反复重启，日志有 `Failed to create .../user-data/SingletonLock: Permission denied`**
+
+NW.js（Chromium）要在 `user-data` 目录创建 SingletonLock，写不进去就主动 Abort，宿主机重启策略再拉起来，形成循环。根因是运行平台的文件权限语义：**Docker Desktop（Windows/macOS 的 WSL2/virtiofs）、NFS、CIFS 挂载卷上 `chown` 静默无效**（属主永远是 root），降权后的 mixly 用户写不进 755 的 user-data。
+
+**用 v2.0.1 及以上镜像即可**（入口脚本已改为 `chmod a+rwX` 权限位兜底 + 启动前实测写入，失败会给出明确诊断而非无限重启）。若你还在用 v2.0，升级镜像后重启容器；`user-data` 里已有的数据不受影响。
+
 ## 致谢与声明
 
 - [Mixly 米思齐](https://mixly.cn) 及其服务端 [mixly2/mixio](https://gitee.com/mixly2/mixio) —— 本仓库仅提供运行环境适配，Mixly 软件版权归原团队所有，请从官方渠道获取运行包并遵守其使用条款。
