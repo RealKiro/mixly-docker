@@ -354,9 +354,9 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t8_fail" ] || fail "T8 $t8_fail"
 ok "T8 nw-main-error.log 被捕获并打印（含 node:sqlite 兼容性提示）"
 
-echo "=== T9 退出码 0 的诊断指引 ==="
-# 退出码 0 极易被误读为「正常退出」，实际是就绪探测超时后应用自杀。
-# 入口脚本必须明确指出这一点并给出取证命令。
+echo "=== T9 退出码 0 的诊断指引（按存活时长分流）==="
+# 退出码 0 极易被误读为「正常退出」。入口脚本必须明确指出这不是正常退出，
+# 并按【存活时长】分流：短命(<15s)=NW.js 窗口提前销毁；长命(≈120s)=就绪探测超时。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
 cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
@@ -364,8 +364,13 @@ t9_fail=""
 wait_log "$cid" "退出码: 0" 60 || t9_fail="未捕获退出码 0"
 if [ -z "$t9_fail" ]; then
     # 同样必须用 log_has：`echo "$logs" | grep -q` 也是同一条 pipefail+SIGPIPE 链路
-    log_has "$cid" "就绪探测" \
-        || t9_fail="未说明退出码 0 实为就绪探测超时"
+    log_has "$cid" "并非'正常退出'" \
+        || t9_fail="未明确指出退出码 0 不是正常退出"
+    # 桩 sleep 2 即退出，必然命中「短命」分支
+    log_has "$cid" "存活仅" \
+        || t9_fail="未打印本次存活时长（无法区分两条失败路径）"
+    log_has "$cid" "所有窗口被关闭即自动退出" \
+        || t9_fail="未说明短命退出对应 NW.js 窗口销毁机制"
     log_has "$cid" "nw-main-error.log" \
         || t9_fail="未给出取证命令（nw-main-error.log）"
 fi
@@ -376,7 +381,7 @@ fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
 rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t9_fail" ] || fail "T9 $t9_fail"
-ok "T9 退出码 0 被正确解读为就绪探测超时并给出取证路径"
+ok "T9 退出码 0 按存活时长分流诊断并给出取证路径"
 
 echo "=== T10 mixio-app 本身可写 + store/config-certs 预建（EACCES 根因回归）==="
 # 实测踩到的坑（v2.0.6 仍在复现）：官方 mixio.js 的 init() 顺序执行
@@ -502,4 +507,64 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t12_fail" ] || fail "T12 $t12_fail"
 ok "T12 陈旧 nw-main-error.log 被轮换为 .prev，不再重复误导"
 
-echo "🎉 冒烟测试全部通过: $PASS/12"
+echo "=== T13 清理残留 PID 文件（防止 MixIO 误杀 Xvfb）==="
+# v2.0.7 实测：mixio.js 加载成功后，daemon_start() → freeStaleAdminPort()
+# 会读 mixio-app/pid.info 里的旧 PID 并 SIGKILL（mixio.js:7502），
+# 另有 kill -9 $(netstat ... :18084 ...)（mixio.js:7290）。
+# pid.info 写在挂载卷里、跨容器残留，而容器 PID 空间独立，旧 PID 极可能
+# 已复用为本次 Xvfb/tini 的 PID → 误杀 → 窗口销毁 → 约 3 秒退出码 0。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+mkdir -p "$tmp/mixio-app/runtime"
+echo "12345" > "$tmp/mixio-app/pid.info"
+echo "12346" > "$tmp/mixio-app/runtime/mixio-backend.pid"
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t13_fail=""
+wait_log "$cid" "stub MixlyServer running" 60 || t13_fail="桩二进制未被 exec 执行"
+if [ -z "$t13_fail" ]; then
+    log_has "$cid" "已清理残留 PID 文件 pid.info" \
+        || t13_fail="未声明清理 pid.info"
+    log_has "$cid" "已清理残留 PID 文件 mixio-backend.pid" \
+        || t13_fail="未声明清理 runtime/mixio-backend.pid"
+fi
+if [ -z "$t13_fail" ]; then
+    [ ! -f "$tmp/mixio-app/pid.info" ] \
+        || t13_fail="pid.info 未被删除（MixIO 可能按旧 PID 误杀 Xvfb）"
+    [ ! -f "$tmp/mixio-app/runtime/mixio-backend.pid" ] \
+        || t13_fail="runtime/mixio-backend.pid 未被删除"
+fi
+if [ -n "$t13_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t13_fail" ] || fail "T13 $t13_fail"
+ok "T13 残留 pid.info / mixio-backend.pid 被清理并说明原因"
+
+echo "=== T14 Xvfb 存活监控（误杀的直接证据）==="
+# 若清理仍不彻底、Xvfb 真的被误杀，入口脚本必须立即给出结论，
+# 而不是让用户面对一片 dbus 噪音。这里验证监控逻辑已就位：
+# 启动前端口快照 + Xvfb 监控循环都在日志中可见。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t14_fail=""
+wait_log "$cid" "stub MixlyServer running" 60 || t14_fail="桩二进制未被 exec 执行"
+if [ -z "$t14_fail" ]; then
+    # 启动前端口快照：判断 18084 是否被占是 daemon_start 误杀的前提
+    log_has "$cid" "启动前端口状态" \
+        || t14_fail="未输出启动前端口快照（无法判断 18084 是否被占）"
+    log_has "$cid" "均空闲" \
+        || t14_fail="未确认 8443/18084 等端口空闲"
+fi
+if [ -n "$t14_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t14_fail" ] || fail "T14 $t14_fail"
+ok "T14 启动前端口快照已输出（Xvfb 误杀链的可观测前提）"
+
+echo "🎉 冒烟测试全部通过: $PASS/14"

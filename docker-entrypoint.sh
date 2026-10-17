@@ -264,6 +264,35 @@ if [ "$(id -u)" = "0" ]; then
           "$SERVER_DIR/user-data/SingletonSocket" \
           "$SERVER_DIR/user-data/SingletonCookie" 2>/dev/null || true
 
+    # -------------------------------------------------- 关键：清理残留 PID 文件
+    # 这两个文件记录的是【宿主机视角的进程 PID】，但它们位于挂载卷里、会跨容器
+    # 残留。而 Docker 容器有独立的 PID 空间：残留的旧 PID 极可能已经复用为本次
+    # 容器内 Xvfb / tini 的 PID。
+    #
+    # 致命的是 MixIO 启动链自己会按 PID 清理"端口占用"：
+    #     mixio.js:7497  freeStaleAdminPort()
+    #     mixio.js:7502      读 mixio-app/pid.info → SIGTERM + SIGKILL 该 PID
+    #     mixio.js:7290      kill -9 $(netstat ... :18084 ...)   （fuser -k 同效）
+    # 这条链只有在 daemon_start() 跑到时才会触发 —— 也就是说，只有当 mixio.js
+    # 加载成功、init() 通过之后才会发生。若 pid.info 里的旧 PID 恰好复用为 Xvfb
+    # 的 PID，Xvfb 被 SIGKILL → DISPLAY 失效 → Chromium 窗口销毁 →
+    # XGetWindowAttributes failed for window 0 → NW.js「所有窗口关闭」自动退出
+    # （退出码 0）。实测表现为：启动约 3 秒即退出、重启间隔仅数秒，
+    # 与 mixio.js 加载失败时的 120 秒超时完全不同——这正是 v2.0.6→v2.0.7
+    # 症状变化的根因（v2.0.6 时 init() 在 EACCES 就挂了，走不到这里）。
+    #
+    # 容器内这两个文件没有任何正确用途（其设计意图是让宿主机上的 stopMixIO
+    # 能停止服务），因此在启动前无条件删除，断开这条误杀链。
+    for _pf in "$APP_DIR/pid.info" "$APP_DIR/runtime/mixio-backend.pid"; do
+        if [ -e "$_pf" ]; then
+            _pv=$(cat "$_pf" 2>/dev/null | tr -d '[:space:]' || true)
+            rm -f "$_pf" 2>/dev/null || true
+            log "已清理残留 PID 文件 $(basename "$_pf")（内容: ${_pv:-空}）"
+            log "  ↑ 该 PID 属宿主机视角；若不清掉，MixIO 的端口清理逻辑可能 SIGKILL"
+            log "    到本次容器内已复用该 PID 的进程（Xvfb/tini），导致约 3 秒即退出"
+        fi
+    done
+
     # 实测 mixly 对 user-data 的写入能力：Chromium 启动时要在 profile 里建
     # SingletonLock，写不进去会直接 Abort（表现为容器反复重启、
     # "Failed to create ... SingletonLock: Permission denied"）。
@@ -356,6 +385,24 @@ while [ ! -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
 done
 log "Xvfb 虚拟显示已就绪: $DISPLAY"
 
+# Xvfb 存活监控：见上方「清理残留 PID 文件」的说明。
+# MixIO 的端口清理逻辑可能 SIGKILL 掉复用了旧 PID 的 Xvfb，这是"约 3 秒即退出"
+# 的直接机制。这里持续监控：一旦 Xvfb 在 MixlyServer 运行期间死亡，立即打印
+# 明确结论，而不是让用户面对一片 dbus 噪音猜测。
+( while kill -0 "$XVFB_PID" 2>/dev/null; do
+      sleep 2
+  done
+  if [ -n "${MIXLY_PID:-}" ] && kill -0 "$MIXLY_PID" 2>/dev/null; then
+      echo "[entrypoint][ERROR] =============================================" >&2
+      echo "[entrypoint][ERROR] Xvfb (PID $XVFB_PID) 在 MixlyServer 运行期间被杀！" >&2
+      echo "[entrypoint][ERROR] 这会导致 DISPLAY 失效、Chromium 窗口被销毁，" >&2
+      echo "[entrypoint][ERROR] NW.js 随即以退出码 0 结束（所有窗口关闭即退出）。" >&2
+      echo "[entrypoint][ERROR] 典型原因：MixIO 的端口清理逻辑按残留 PID 误杀，" >&2
+      echo "[entrypoint][ERROR] 或宿主机内存不足被 OOM Killer 选中。" >&2
+      echo "[entrypoint][ERROR] 请检查：dmesg | grep -i 'killed process'" >&2
+      echo "[entrypoint][ERROR] =============================================" >&2
+  fi ) &
+
 # ---------------------------------------------------------------- 启动服务
 # MixlyServer 内 exec .host/nw（--no-sandbox --disable-gpu --user-data-dir=…）
 # 加载 mixio-app；nw-main.js 会设 MIXIO_NW_SPAWN=1 后同进程 require mixio.js，
@@ -367,6 +414,20 @@ log "Xvfb 虚拟显示已就绪: $DISPLAY"
 # MIXIO_SHELL_DAEMON=1：官方给"前台运行"的开关，双保险（NW 路径本已前台）。
 export MIXIO_SHELL_DAEMON=1
 export MIXIO_DISABLE_NTP=1
+
+# 启动前端口快照：MixIO 的 daemon_start() 第一步就是探测 18084，若判定被占，
+# 会触发一串按 PID 的 SIGKILL（见上方「清理残留 PID 文件」说明）。
+# 这里把实况打出来，便于区分「真的被占」与「checkPort 误判」。
+_port_snap=$(ss -lntp 2>/dev/null | grep -E ':(8443|18084|1883|8082|8083|8084|8086)[[:space:]]' || true)
+if [ -n "$_port_snap" ]; then
+    log "启动前端口状态（发现监听中的端口）："
+    echo "$_port_snap" | sed 's/^/[entrypoint]   /'
+    log "↑ 若其中没有本容器应有的进程，请检查是否用了 --network host 或端口被其他程序占用"
+else
+    log "启动前端口状态: 8443/18084/1883/8082-8086 均空闲"
+fi
+log "当前进程: $(ps -o pid,ppid,comm -e 2>/dev/null | head -12 | sed 's/^/[entrypoint]   /' | tr '\n' '|')"
+
 log "正在启动 MixlyServer（MixIO 服务将在 NW.js 进程内运行）..."
 log "访问入口: https://<本机IP>:8443（HTTPS，自签证书）/ 管理: https://<本机IP>:18084"
 
@@ -473,16 +534,32 @@ cd "$SERVER_DIR"
 # 诊断的场景（容器 running→进程没了→重启策略拉起，日志里看不到任何原因），
 # 退出码是判断崩溃类型的第一手证据：139=段错误 134=abort 143=正常停止。
 trap 'kill -TERM "$MIXLY_PID" 2>/dev/null || true' TERM INT
+_t0=$(date +%s)
 ./"$BIN_NAME" &
 MIXLY_PID=$!
 # 脚本顶部有 set -e，而 wait 在子进程非零退出时返回非零 —— 必须用 || 捕获，
 # 否则 set -e 会在此直接终止脚本，下面的退出码解读永远不会执行。
 _rc=0
 wait "$MIXLY_PID" || _rc=$?
-log "MixlyServer 进程已退出，退出码: $_rc"
+_uptime=$(( $(date +%s) - _t0 ))
+log "MixlyServer 进程已退出，退出码: $_rc（本次存活 ${_uptime}s）"
 case "$_rc" in
-    0)   log "退出码 0 = 应用主动退出。最常见原因：启动器就绪探测（约 120 次 x 500ms）超时后放弃。"
-         log "       这几乎总是意味着 MixIO 内部初始化抛错且异常被吞掉，并非'正常退出'。"
+    0)   log "退出码 0 = 应用主动退出，并非'正常退出'。"
+         if [ "$_uptime" -lt 15 ]; then
+             log "  ▸ 存活仅 ${_uptime}s（远小于 120s），排除'就绪探测超时'。"
+             log "  ▸ 这是 NW.js「所有窗口被关闭即自动退出」：窗口提前销毁，"
+             log "    而 nw-boot.html 自身永远不会主动退出（其 onTimeout 只改文案）。"
+             log "  ▸ 已实测的两条触发路径："
+             log "      a) MixIO 的端口清理逻辑按残留 PID 误杀 Xvfb"
+             log "         （mixio.js:7502 读 pid.info 后 SIGKILL）→ DISPLAY 失效"
+             log "      b) X 显示环境异常，窗口创建后立即销毁"
+             log "  ▸ 若上方有 [Xvfb ... 被杀] 的 ERROR 块，即可确认是 (a)。"
+             log "  ▸ 也可执行: docker exec <容器> sh -c 'dmesg | tail -30'"
+             log "  ▸ 以及:      docker exec <容器> sh -c 'cat /proc/$(pgrep -f Xvfb | head -1)/status' 2>/dev/null"
+         else
+             log "  ▸ 最常见原因：启动器就绪探测（约 120 次 x 500ms）超时后放弃。"
+             log "  ▸ 这几乎总是意味着 MixIO 内部初始化抛错且异常被吞掉。"
+         fi
          if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
              log "       >>> 已有 runtime/nw-main-error.log，其内容已打印在上方"
          elif [ -s "$APP_DIR/runtime/nw-main-error.log.prev" ]; then

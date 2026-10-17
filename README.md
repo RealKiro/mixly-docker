@@ -170,7 +170,7 @@ NW.js（Chromium）要在 `user-data` 目录创建 SingletonLock，写不进去�
 
 **用 v2.0.1 及以上镜像即可**（入口脚本已改为 `chmod a+rwX` 权限位兜底 + 启动前实测写入，失败会给出明确诊断而非无限重启）。若你还在用 v2.0，升级镜像后重启容器；`user-data` 里已有的数据不受影响。
 
->补充：升级到最新版（v2.0.7+）后请直接用 `latest`。若容器仍在重启，先排除这一类权限问题，再看 Q11——两者的日志特征完全不同（Q8 有 `SingletonLock: Permission denied`，Q11 是一片空白或 `EACCES ... mkdir`）。另注意：`docker run` / `compose up` 不会自动拉取新版 `latest`，升级必须先 `docker pull` 再删旧容器。
+>补充：升级到最新版（v2.0.8+）后请直接用 `latest`。若容器仍在重启，先排除这一类权限问题，再看 Q11——两者的日志特征完全不同（Q8 有 `SingletonLock: Permission denied`，Q11 是空白、`EACCES ... mkdir` 或只活几秒）。另注意：`docker run` / `compose up` 不会自动拉取新版 `latest`，升级必须先 `docker pull` 再删旧容器。
 
 **Q9：日志里这些报错要不要管？**
 
@@ -209,10 +209,11 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 | 无日志、`logs/` 为空 | MixIO 还没进入初始化 | 先确认第 1 步不是 `starting`，再看第 3 步端口 |
 | `EADDRINUSE` / 端口被占 | 同容器内端口冲突或旧进程残留 | `docker exec <容器名> sh -c 'cat /opt/mixly_server/mixio-app/pid.info'` 看 PID 是否存在；容器重建即可清干净 |
 | 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | compose 加 `shm_size: '1gb'`、`docker run` 加 `--shm-size=1g`，并留1.5GB+ 内存 |
-| 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；v2.0.6 起会自动打印 `runtime/nw-main-error.log`，多数情况升级到 v2.0.7 即可 |
+| 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；v2.0.6 起会自动打印 `runtime/nw-main-error.log`，多数情况升级到 v2.0.8 即可 |
 | `EACCES: permission denied, mkdir '.../mixio-app/store'` | `mixio-app` 目录本身对 mixly 用户不可写（`chown` 在 virtiofs/NFS 上无效） | 升级到 v2.0.7+；或在宿主机 `chmod -R a+rwX <mixly-app 所在目录>` |
+| 容器**只活几秒**就重启、退出码 0、日志有 `XGetWindowAttributes failed for window 0` | **残留 `pid.info` 导致 MixIO 误杀 Xvfb**，见 Q11 路径 3 | 升级到 v2.0.8+；日志会打印 `本次存活 Ns` 与 `已清理残留 PID 文件` |
 
-**Q11：容器每隔约 120 秒自动重启，退出码 0，`docker logs` 完全空白**
+**Q11：容器反复自动重启、退出码 0，`docker logs` 里看不到真实原因**
 
 这是 Mixly 4.0 官方包在容器里的一个已知启动链缺陷，**不是你的配置错了**，也不是 `/dev/shm` 或证书问题。根因在 `mixio-app/mixio.js`：
 
@@ -224,7 +225,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
  nw-boot.html    探测 8443，120 次 × 500ms 失败后放弃 → 退出码 0
 ```
 
-**两个已实测确认的触发路径**（都会得到完全相同的「120 秒重启 + 日志空白」）：
+**三个已实测确认的触发路径**（前两条症状几乎相同，第三条则表现为「数秒即重启」）：
 
 1. **`filter.json` 缺失**（v2.0.6 修复）。官方**只在 `storage` 目录不存在时**才创建 `filter.json`；而容器为了 `chown`/`chmod` 会预先建好 `storage`，官方因此认为「已初始化」而跳过创建 → 6756 行读 `filter.json` 得到 `ENOENT` 并抛错。
 
@@ -235,9 +236,20 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
        at init (/opt/mixly_server/mixio-app/mixio.js:923:12)
    ```
 
-由于 `.then()` 没有 `.catch()`，上述任何一种异常都被彻底吞掉：不打印、不退出、8443 永不监听 → 启动器探测约 120 秒后放弃、退出码 0 → 重启策略再拉起。
+3. **残留 PID 文件导致误杀 Xvfb**（v2.0.8 修复）。这条最隐蔽：`mixio.js` 加载成功、`init()` 也通过了，但紧接着 `daemon_start()` → `freeStaleAdminPort()` 会按 PID 清理「18084 端口占用」：
 
-**v2.0.6 / v2.0.7 起镜像已分别覆盖这两条路径，多数情况下升级镜像即可正常启动：**
+   ```
+   mixio.js:7497   freeStaleAdminPort()
+   mixio.js:7502       读 mixio-app/pid.info 里的旧 PID → SIGTERM + SIGKILL
+   mixio.js:7290       kill -9 $(netstat -lntp | ... :18084 ...)
+   mixio.js:7537       fuser -k 18084/tcp / ss -lntp 找占用者后 SIGKILL
+   ```
+
+   `pid.info` 写在**挂载卷**里、会跨容器残留，内容却是**宿主机视角的 PID**。Docker 容器有独立 PID 空间，这个旧数值极可能已经复用为本次容器内 **Xvfb**（或 tini）的 PID → 被 `SIGKILL` → `DISPLAY` 失效 → Chromium 窗口销毁（日志出现 `XGetWindowAttributes failed for window 0`）→ NW.js「所有窗口关闭即自动退出」→ **退出码 0，但只活约 3 秒**。
+
+   > 注意这条与 1、2 的**存活时长差异**：1、2 是约 120 秒后退出；3 只有几秒。v2.0.8 起入口脚本会打印 `本次存活 Ns` 并按此时长自动分流诊断。
+
+**v2.0.6 / v2.0.7 / v2.0.8 起镜像已分别覆盖这三条路径，多数情况下升级镜像即可正常启动：**
 
 ```bash
 # 1) 换成新镜像（注意：docker run / compose up 不会自动拉新版 latest）
@@ -248,8 +260,8 @@ docker run -d --name <容器名> --restart unless-stopped --shm-size=1g \
   -v /你的路径/mixly_server:/opt/mixly_server \
   ghcr.io/realkiro/mixly-server:latest
 
-# 2) 确认这行出现（说明 v2.0.6+ 真的跑起来了）
-docker logs <容器名> 2>&1 | grep 已预置
+# 2) 确认这两类行出现（说明 v2.0.8 真的跑起来了）
+docker logs <容器名> 2>&1 | grep -E "已预置|已清理残留 PID 文件"
 ```
 
 如果升级后仍反复重启，说明是另一类问题。v2.0.6 起 `runtime/nw-main-error.log` 会被自动打印到 `docker logs`，先看它：
