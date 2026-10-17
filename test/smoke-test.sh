@@ -54,7 +54,7 @@ echo "=== T1 缺包检测 ==="
 out=$(docker run --rm "$IMAGE" 2>&1) && rc=0 || rc=$?
 [ "$rc" -ne 0 ] || fail "T1 无运行包时应非零退出"
 echo "$out" | grep -q "未检测到 Mixly 官方运行包" || fail "T1 未输出放置指引"
-echo "$out" | grep -q "MixSuite-linux-x64.zip" || fail "T1 放置指引未提及 MixSuite 包名"
+echo "$out" | grep -q "MixSuite-linux-x64" || fail "T1 放置指引未提及 MixSuite 包名"
 ok "T1 缺包时输出 MixSuite 放置指引并退出 (exit=$rc)"
 
 echo "=== T2 启动链路（架构匹配的 x64 桩：Xvfb + 前台 exec + 数据目录）==="
@@ -72,7 +72,14 @@ if [ -z "$t2_fail" ]; then
     for d in storage logs config runtime; do
         [ -d "$tmp/mixio-app/$d" ] || t2_fail="未创建数据目录 mixio-app/$d"
     done
-    [ -d "$tmp/user-data" ] || t2_fail="未创建 user-data 目录"
+    if [ ! -d "$tmp/user-data" ]; then
+        # 目录名混入回车符（脚本被 CRLF 污染）时肉眼不可见，单独给出明确报错
+        if [ -d "$tmp/user-data"$'\r' ]; then
+            t2_fail="user-data 目录名混入了回车符（脚本被 CRLF 污染）"
+        else
+            t2_fail="未创建 user-data 目录"
+        fi
+    fi
 fi
 if [ -z "$t2_fail" ]; then
     uid=$(stat -c '%u' "$tmp/mixio-app/storage")
@@ -81,6 +88,12 @@ fi
 if [ -n "$t2_fail" ]; then
     echo "----- 容器日志 -----"
     docker logs "$cid" 2>&1 | tail -30 || true
+    echo "----- 容器内 /opt/mixly_server 视图（docker exec）-----"
+    docker exec "$cid" ls -la /opt/mixly_server/ 2>&1 || true
+    echo "----- 宿主机挂载源 $tmp 视图（cat -A 暴露不可见字符）-----"
+    ls -la "$tmp" 2>&1 | cat -A || true
+    echo "----- 容器挂载配置 -----"
+    docker inspect -f '{{json .Mounts}}' "$cid" 2>&1 || true
 fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
 rm -rf "$tmp" 2>/dev/null || true

@@ -127,6 +127,7 @@ if [ "$(id -u)" = "0" ]; then
     # mixio-app 与套件根目录本身（pid.info / user-data / config 重建）。
     # .host、mixly、mixco、mixmo 等静态大目录保持 root 只读，不做递归 chown。
     MIXLY_UID=$(id -u mixly)
+    log "root: 开始准备数据目录（套件根=$SERVER_DIR, mixly uid=$MIXLY_UID）"
     for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" "$APP_DIR/runtime"; do
         mkdir -p "$_d"
         [ "$(stat -c '%u' "$_d" 2>/dev/null)" = "$MIXLY_UID" ] || chown -R mixly:mixly "$_d"
@@ -135,6 +136,20 @@ if [ "$(id -u)" = "0" ]; then
     [ "$(stat -c '%u' "$SERVER_DIR/user-data" 2>/dev/null)" = "$MIXLY_UID" ] \
         || chown -R mixly:mixly "$SERVER_DIR/user-data"
     chown mixly:mixly "$SERVER_DIR" "$APP_DIR"
+
+    # 自检：五个可写目录必须都存在。缺任何一个都直接报错退出，
+    # 把问题暴露在启动阶段，而不是留到后面出现诡异症状。
+    for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
+              "$APP_DIR/runtime" "$SERVER_DIR/user-data"; do
+        if [ ! -d "$_d" ]; then
+            echo "[entrypoint][ERROR] 数据目录创建失败: $_d" >&2
+            ls -ld "$SERVER_DIR" "$APP_DIR" >&2 || true
+            exit 1
+        fi
+    done
+    log "root: 数据目录就绪: $(ls -d \
+        "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
+        "$APP_DIR/runtime" "$SERVER_DIR/user-data" 2>&1 | tr '\n' ' ')"
 
     # zip 解压后常丢失执行位；firstrun.sh 亦要求对这三个文件 chmod +x
     chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" \

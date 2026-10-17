@@ -1,0 +1,4 @@
+# 统一行尾为 LF：shell 脚本在 Windows 上 checkout 成 CRLF 时，
+# 容器内会出现「mkdir 出带 \r 的目录名」等诡异问题（且肉眼不可见）。
+*.sh text eol=lf
+.gitattributes text eol=lf
