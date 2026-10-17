@@ -179,7 +179,8 @@ v2.0.2 起，容器正常运行时日志里只会剩下**无害噪音**，可对
 | 日志片段 | 性质 |
 |---|---|
 | `dbus/bus.cc: Failed to connect to the bus` / `org.freedesktop.DBus...` | 无害。容器内无 dbus daemon，Chromium 每次启动必报几十行 |
-| `XGetWindowAttributes failed for window 0` | 无害。Xvfb 虚拟显示下的窗口告警 |
+| `XGetWindowAttributes failed for window 0` | **单独出现时无害**（Xvfb 下的窗口告警）；但若它紧邻「进程数秒内退出 + 退出码 0」，则是窗口层故障的信号，见 Q11 路径 3 |
+| 完全没有 `Checking ports` / `Starting NW runtime` / `Loading MixIO service` | 无害。官方启动器父进程的 stdout 在管道下全缓冲，这些进度会随缓冲区丢失，**看不到不代表没执行**；见 Q11 路径 4 |
 | `chrome_crashpad_handler: --database is required` | 无害。崩溃上报组件，NW.js 自带 |
 | `Fontconfig error: No writable cache directories` / `Failed to create .../pki/nssdb` | **v2.0.1 及更早会出现**；v2.0.2 已预建可写的 `.cache` / `.local/share` 与 XDG 目录，升级后消失 |
 | `handshake failed ... net_error -101` | 离线内网环境下拉取外部 HTTPS 资源失败，属正常。若 `https://IP:8443` 能正常打开界面即可忽略；打不开才需排查 |
@@ -211,7 +212,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 | 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | compose 加 `shm_size: '1gb'`、`docker run` 加 `--shm-size=1g`，并留1.5GB+ 内存 |
 | 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；v2.0.6 起会自动打印 `runtime/nw-main-error.log`，多数情况升级到 v2.0.8 即可 |
 | `EACCES: permission denied, mkdir '.../mixio-app/store'` | `mixio-app` 目录本身对 mixly 用户不可写（`chown` 在 virtiofs/NFS 上无效） | 升级到 v2.0.7+；或在宿主机 `chmod -R a+rwX <mixly-app 所在目录>` |
-| 容器**只活几秒**就重启、退出码 0、日志有 `XGetWindowAttributes failed for window 0` | **残留 `pid.info` 导致 MixIO 误杀 Xvfb**，见 Q11 路径 3 | 升级到 v2.0.8+；日志会打印 `本次存活 Ns` 与 `已清理残留 PID 文件` |
+| 容器**只活几秒**就重启、退出码 0、日志有 `XGetWindowAttributes failed for window 0`，且 `nw-main-error.log` 无新内容 | **NW 壳/窗口层故障**（窗口句柄为 0，从未创建成功），见 Q11 路径 3 | 先用 `-e MIXLY_NW_SELFTEST=1` 区分环境/应用层，再用 `-e MIXLY_DIRECT_NW=1` 取 Chromium 内部日志 |
 
 **Q11：容器反复自动重启、退出码 0，`docker logs` 里看不到真实原因**
 
@@ -225,7 +226,7 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
  nw-boot.html    探测 8443，120 次 × 500ms 失败后放弃 → 退出码 0
 ```
 
-**三个已实测确认的触发路径**（前两条症状几乎相同，第三条则表现为「数秒即重启」）：
+**四个已实测确认的触发路径**（前两条症状几乎相同，后两条表现为「数秒即重启」）：
 
 1. **`filter.json` 缺失**（v2.0.6 修复）。官方**只在 `storage` 目录不存在时**才创建 `filter.json`；而容器为了 `chown`/`chmod` 会预先建好 `storage`，官方因此认为「已初始化」而跳过创建 → 6756 行读 `filter.json` 得到 `ENOENT` 并抛错。
 
@@ -236,20 +237,30 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
        at init (/opt/mixly_server/mixio-app/mixio.js:923:12)
    ```
 
-3. **残留 PID 文件导致误杀 Xvfb**（v2.0.8 修复）。这条最隐蔽：`mixio.js` 加载成功、`init()` 也通过了，但紧接着 `daemon_start()` → `freeStaleAdminPort()` 会按 PID 清理「18084 端口占用」：
+3. **NW 壳 / 窗口层故障：进程只活 2~3 秒**（v2.0.9 新增诊断开关，根待定位）。这是 1、2 都修好之后暴露出来的下一层。日志特征与 1、2 **明显不同**：
 
    ```
-   mixio.js:7497   freeStaleAdminPort()
-   mixio.js:7502       读 mixio-app/pid.info 里的旧 PID → SIGTERM + SIGKILL
-   mixio.js:7290       kill -9 $(netstat -lntp | ... :18084 ...)
-   mixio.js:7537       fuser -k 18084/tcp / ss -lntp 找占用者后 SIGKILL
+   16:06:40  正在启动 MixlyServer
+   16:06:41~42  大量 dbus 噪音 + XGetWindowAttributes failed for window 0
+   16:06:43  MixlyServer 进程已退出，退出码: 0（本次存活 3s）
    ```
 
-   `pid.info` 写在**挂载卷**里、会跨容器残留，内容却是**宿主机视角的 PID**。Docker 容器有独立 PID 空间，这个旧数值极可能已经复用为本次容器内 **Xvfb**（或 tini）的 PID → 被 `SIGKILL` → `DISPLAY` 失效 → Chromium 窗口销毁（日志出现 `XGetWindowAttributes failed for window 0`）→ NW.js「所有窗口关闭即自动退出」→ **退出码 0，但只活约 3 秒**。
+   关键判据：**存活只有几秒**（1、2 是约 120 秒），且 `runtime/nw-main-error.log` **没有新内容**——说明 `mixio.js` 已加载成功、`init()` 也通过了，故障不在 MixIO 初始化，而在 NW 壳。`XGetWindowAttributes failed for window 0` 里的 **window 0** 表示窗口句柄为空，即窗口从未真正创建成功、随后被销毁；NW.js 的默认行为是「所有窗口关闭即退出」，于是得到退出码 0。
 
-   > 注意这条与 1、2 的**存活时长差异**：1、2 是约 120 秒后退出；3 只有几秒。v2.0.8 起入口脚本会打印 `本次存活 Ns` 并按此时长自动分流诊断。
+   已实测**证伪**的几个猜测，列出来避免重复走弯路：
 
-**v2.0.6 / v2.0.7 / v2.0.8 起镜像已分别覆盖这三条路径，多数情况下升级镜像即可正常启动：**
+   | 猜测 | 证伪依据 |
+   |---|---|
+   | 残留 PID 误杀 Xvfb | `pid.info` 内容为 203，而该次容器内最高 PID 仅 146，`kill` 只会得到 ESRCH；且 Xvfb 全程存活、无被杀记录 |
+   | `/dev/shm` 不足 | 那会得到退出码 **139（SIGSEGV）**，不是 0 |
+   | 证书问题 | `package.json` 的 `chromium-args` 已含 `--ignore-certificate-errors` |
+   | 端口冲突触发 `Continue? [y/N]` | 启动前端口快照显示 8443/18084 等均空闲 |
+
+   v2.0.8 起入口脚本会打印 `本次存活 Ns` 并按此时长自动分流诊断；v2.0.9 起提供两个专用开关直接取证（见下）。
+
+4. **官方启动器自身的可观测性缺陷**（v2.0.9 新增旁路模式）。`MixlyServer` 是 `fork` + `execv` 的壳，父进程负责打印 `Checking ports` / `Port conflict detected` / `Starting NW runtime` / `Loading MixIO service` 等进度——但**父进程的 stdout 在管道下是全缓冲的**，容器非 TTY 时这些消息会随缓冲区一起丢失。所以「日志里看不到启动器进度」是正常的，不代表没执行；反之，一旦启动器真的在 `Checking ports` 阶段退出，你同样看不到任何原因。它还有 `Continue? [y/N]` 交互询问，非 TTY 下读 stdin 立即 EOF。
+
+**v2.0.6 / v2.0.7 / v2.0.8 起镜像已分别覆盖前两条路径，多数情况下升级镜像即可正常启动：**
 
 ```bash
 # 1) 换成新镜像（注意：docker run / compose up 不会自动拉新版 latest）
@@ -264,7 +275,41 @@ docker run -d --name <容器名> --restart unless-stopped --shm-size=1g \
 docker logs <容器名> 2>&1 | grep -E "已预置|已清理残留 PID 文件"
 ```
 
-如果升级后仍反复重启，说明是另一类问题。v2.0.6 起 `runtime/nw-main-error.log` 会被自动打印到 `docker logs`，先看它：
+### 第 3 条路径的两个专用诊断开关（v2.0.9+）
+
+如果升级后仍反复重启，且日志特征是「数秒即退出 + `XGetWindowAttributes failed for window 0`」，用下面两个开关直接取证。两者都不修改官方运行包，只是在容器入口层多走一条路。
+
+**① `MIXLY_NW_SELFTEST=1` —— 先判断是环境问题还是应用层问题**
+
+CI 冒烟测试一直用桩替换 `MixlyServer`，真实 Chromium 从未被验证过，所以「CI 全绿」不等于镜像运行时依赖齐备。自检模式用一个最小 NW 应用（临时 `package.json` + `index.html`）测本容器能否创建窗口并加载页面：
+
+```bash
+docker run --rm -e MIXLY_NW_SELFTEST=1 \
+  -v /你的路径/mixly_server:/opt/mixly_server \
+  ghcr.io/realkiro/mixly-server:latest
+```
+
+- `✅ 通过` → 镜像依赖齐备，问题在 MixSuite 应用层 → 用开关 ② 继续
+- `❌ 失败` → NW.js/Chromium 在本容器建不了窗口，属镜像依赖问题 → 把完整日志反馈，以便补依赖
+
+**② `MIXLY_DIRECT_NW=1` —— 绕过官方启动器，打开 Chromium 内部日志**
+
+直接 `exec .host/nw`（参数与官方启动器完全一致，见入口脚本注释），并追加 `--enable-logging=stderr`，把 Chromium 的窗口创建、GPU 进程、渲染进程等内部状态全部打出来：
+
+```bash
+docker run -d --name mixly-diag -e MIXLY_DIRECT_NW=1 --restart unless-stopped --shm-size=1g \
+  -p 8443:8443 -p 18084:18084 \
+  -v /你的路径/mixly_server:/opt/mixly_server \
+  ghcr.io/realkiro/mixly-server:latest
+
+docker logs mixly-diag 2>&1 | tail -80
+```
+
+日志里会明确出现窗口为何创建失败（缺 X11 扩展、widget 未初始化等）。找到原因后去掉 `-e MIXLY_DIRECT_NW=1` 即可恢复官方启动器路径。
+
+> 两个开关都是**诊断用**，不作为默认启动方式：官方启动器承担了环境检查与端口冲突处理，绕过它会失去这些保护。
+
+如果升级后仍反复重启，v2.0.6 起 `runtime/nw-main-error.log` 会被自动打印到 `docker logs`，先看它：
 
 ```bash
 # A) mixio.js 加载失败时，nw-main.js 会把完整堆栈写到这里（已自动打印，这里可复查）
@@ -291,8 +336,8 @@ v2.0.6 / v2.0.7 起入口脚本会自动完成以下动作，不必再手工取�
 - 启动前实测 mixly 对 `user-data`、`mixio-app`、`storage/reserve` 三处的写入能力，失败即明确报错退出
 - 主动捕获并打印 `runtime/nw-main-error.log` 的完整内容，并按错误类型分流诊断
 - 把上一次残留的 `nw-main-error.log` 轮换为 `.prev`，避免旧错误被反复误读为新故障
-- 退出码 0 时明确指出「这是就绪探测超时，不是正常退出」并打印取证命令
-- 就绪检查期间输出 `storage` 目录实况与 `mixio-app` 权限
+- 退出码 0 时打印 `本次存活 Ns` 并按存活时长分流：**<15s 指向窗口层，≥15s 才指向就绪探测超时**
+- 启动前输出端口监听快照与进程列表，便于判断 18084 是否真被占
 
 > **注意**：`docker run` / `docker compose up` 在本地已存在同名 `latest` tag 时**不会**拉取新镜像。升级必须 `docker pull`（compose 用 `docker compose pull`）后**删除旧容器再启动**，否则跑的仍是旧版——旧版与新版的日志文案不同，可用 `docker logs | grep 已预置` 判断当前到底跑的是哪一版。
 

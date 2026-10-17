@@ -264,32 +264,31 @@ if [ "$(id -u)" = "0" ]; then
           "$SERVER_DIR/user-data/SingletonSocket" \
           "$SERVER_DIR/user-data/SingletonCookie" 2>/dev/null || true
 
-    # -------------------------------------------------- 关键：清理残留 PID 文件
+    # -------------------------------------------------- 防御性：清理残留 PID 文件
     # 这两个文件记录的是【宿主机视角的进程 PID】，但它们位于挂载卷里、会跨容器
-    # 残留。而 Docker 容器有独立的 PID 空间：残留的旧 PID 极可能已经复用为本次
-    # 容器内 Xvfb / tini 的 PID。
+    # 残留。而 Docker 容器有独立的 PID 空间，两者毫无对应关系。
     #
-    # 致命的是 MixIO 启动链自己会按 PID 清理"端口占用"：
+    # MixIO 启动链自己会按 PID 清理"端口占用"：
     #     mixio.js:7497  freeStaleAdminPort()
     #     mixio.js:7502      读 mixio-app/pid.info → SIGTERM + SIGKILL 该 PID
     #     mixio.js:7290      kill -9 $(netstat ... :18084 ...)   （fuser -k 同效）
-    # 这条链只有在 daemon_start() 跑到时才会触发 —— 也就是说，只有当 mixio.js
-    # 加载成功、init() 通过之后才会发生。若 pid.info 里的旧 PID 恰好复用为 Xvfb
-    # 的 PID，Xvfb 被 SIGKILL → DISPLAY 失效 → Chromium 窗口销毁 →
-    # XGetWindowAttributes failed for window 0 → NW.js「所有窗口关闭」自动退出
-    # （退出码 0）。实测表现为：启动约 3 秒即退出、重启间隔仅数秒，
-    # 与 mixio.js 加载失败时的 120 秒超时完全不同——这正是 v2.0.6→v2.0.7
-    # 症状变化的根因（v2.0.6 时 init() 在 EACCES 就挂了，走不到这里）。
+    # 这条链只有在 daemon_start() 跑到时才会触发。
     #
-    # 容器内这两个文件没有任何正确用途（其设计意图是让宿主机上的 stopMixIO
-    # 能停止服务），因此在启动前无条件删除，断开这条误杀链。
+    # 【实测证伪的归因，不要再沿这个方向排查】曾把"约 3 秒退出"归因于此：
+    # 若 pid.info 旧 PID 复用为 Xvfb 的 PID，Xvfb 被 SIGKILL → DISPLAY 失效
+    # → Chromium 窗口销毁 → XGetWindowAttributes failed for window 0 → NW.js
+    # 「所有窗口关闭」自动退出（退出码 0）。
+    # 但后续实测否定了它：pid.info 内容为 203，而该容器内最高 PID 仅 146，
+    # kill 只会得到 ESRCH；且 Xvfb 全程存活、无任何被杀记录。
+    # 换言之：这是【防御性】清理（成本为零、去掉一个不确定因素），
+    # 不是"约 3 秒退出"的根因。真正的窗口层故障请用 MIXLY_NW_SELFTEST=1 /
+    # MIXLY_DIRECT_NW=1 取证，见下方启动段。
     for _pf in "$APP_DIR/pid.info" "$APP_DIR/runtime/mixio-backend.pid"; do
         if [ -e "$_pf" ]; then
             _pv=$(cat "$_pf" 2>/dev/null | tr -d '[:space:]' || true)
             rm -f "$_pf" 2>/dev/null || true
             log "已清理残留 PID 文件 $(basename "$_pf")（内容: ${_pv:-空}）"
-            log "  ↑ 该 PID 属宿主机视角；若不清掉，MixIO 的端口清理逻辑可能 SIGKILL"
-            log "    到本次容器内已复用该 PID 的进程（Xvfb/tini），导致约 3 秒即退出"
+            log "  ↑ 该 PID 属宿主机视角，与容器 PID 空间无对应关系（防御性清理）"
         fi
     done
 
@@ -367,7 +366,11 @@ fi
 # 同一容器重启后 PID 命名空间是全新的，上一次的 X socket/lock 已是残留
 rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 
-Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp &
+# -ac 关掉 X 访问控制：Xvfb 由 root 分支启动（gosu 降权前的同一进程），
+# 而降权后的 mixly 用户是另一个 uid。无 -ac 时能否连上取决于 X 服务器的
+# host-based 控制实现，加上它彻底消除这个变量（-nolisten tcp 保证不开 TCP 端口，
+# 只听 unix socket，安全性不受影响）。
+Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp -ac &
 XVFB_PID=$!
 
 _waited=0
@@ -385,10 +388,10 @@ while [ ! -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
 done
 log "Xvfb 虚拟显示已就绪: $DISPLAY"
 
-# Xvfb 存活监控：见上方「清理残留 PID 文件」的说明。
-# MixIO 的端口清理逻辑可能 SIGKILL 掉复用了旧 PID 的 Xvfb，这是"约 3 秒即退出"
-# 的直接机制。这里持续监控：一旦 Xvfb 在 MixlyServer 运行期间死亡，立即打印
-# 明确结论，而不是让用户面对一片 dbus 噪音猜测。
+# Xvfb 存活监控：Xvfb 若在 MixlyServer 运行期间死亡，DISPLAY 会失效、
+# Chromium 窗口被销毁、NW.js 随即以退出码 0 结束（所有窗口关闭即退出）。
+# 这是一个通用兜底监控，不再特指某一种根因——"约 3 秒退出"已实测与它无关
+# （那次 Xvfb 全程存活），保留它是为了在真的发生时不留下空白日志。
 ( while kill -0 "$XVFB_PID" 2>/dev/null; do
       sleep 2
   done
@@ -397,17 +400,24 @@ log "Xvfb 虚拟显示已就绪: $DISPLAY"
       echo "[entrypoint][ERROR] Xvfb (PID $XVFB_PID) 在 MixlyServer 运行期间被杀！" >&2
       echo "[entrypoint][ERROR] 这会导致 DISPLAY 失效、Chromium 窗口被销毁，" >&2
       echo "[entrypoint][ERROR] NW.js 随即以退出码 0 结束（所有窗口关闭即退出）。" >&2
-      echo "[entrypoint][ERROR] 典型原因：MixIO 的端口清理逻辑按残留 PID 误杀，" >&2
-      echo "[entrypoint][ERROR] 或宿主机内存不足被 OOM Killer 选中。" >&2
       echo "[entrypoint][ERROR] 请检查：dmesg | grep -i 'killed process'" >&2
       echo "[entrypoint][ERROR] =============================================" >&2
   fi ) &
 
 # ---------------------------------------------------------------- 启动服务
-# MixlyServer 内 exec .host/nw（--no-sandbox --disable-gpu --user-data-dir=…）
-# 加载 mixio-app；nw-main.js 会设 MIXIO_NW_SPAWN=1 后同进程 require mixio.js，
+# MixlyServer 是官方壳：设好 LD_LIBRARY_PATH 后 fork + execv .host/nw
+# （--nwapp=mixio-app --user-data-dir=… --ozone-platform=x11 --no-sandbox
+#  --disable-gpu --in-process-gpu …），父进程负责打印检查进度并等待端口就绪。
+# nw 加载 mixio-app 后，nw-main.js 会设 MIXIO_NW_SPAWN=1 再同进程 require mixio.js，
 # 使其走 args=['debug'] 的前台分支（daemon_start + startOnce），服务不 spawn
 # 子进程、与容器同生命周期，SIGTERM 由 tini 转发、应用自行优雅退出。
+#
+# 已知的启动器局限（容器场景）：
+#   * 父进程 stdout 在管道下是【全缓冲】，其 "Checking ports"、
+#     "Starting NW runtime"、"Loading MixIO service" 等进度会随缓冲区丢失，
+#     连 "Port conflict detected" 也看不到 —— 日志里没有它们不代表没执行。
+#   * 带 "Continue? [y/N]" 交互询问，非 TTY 下读 stdin 立即 EOF。
+# 需要 Chromium 内部日志时用 MIXLY_DIRECT_NW=1 绕过它（见下方）。
 #
 # MIXIO_DISABLE_NTP=1：容器内非 root 无法绑定特权端口 123（仅告警，但会刷日志），
 # 显式跳过 NTP 仿真（mixio.js 认这个开关）。
@@ -430,6 +440,103 @@ log "当前进程: $(ps -o pid,ppid,comm -e 2>/dev/null | head -12 | sed 's/^/[e
 
 log "正在启动 MixlyServer（MixIO 服务将在 NW.js 进程内运行）..."
 log "访问入口: https://<本机IP>:8443（HTTPS，自签证书）/ 管理: https://<本机IP>:18084"
+
+# ------------------------------------------- NW.js 调用参数（与官方启动器一致）
+# 从官方 MixlyServer 二进制里提取到的真实调用形式（见其字符串表）：
+#   LD_LIBRARY_PATH=<suite>/.host/lib:<suite>/.host
+#   --nwapp=<mixio-app>  --user-data-dir=<suite>/user-data
+#   --ozone-platform=x11 --ozone-platform-hint=x11 --no-sandbox
+#   --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu
+#   --disable-dev-shm-usage --in-process-gpu
+# 启动器本身是 fork + execv，父进程负责打印 "Checking ports / Starting NW
+# runtime / Loading MixIO service" 等进度。但父进程的 stdout 在管道下是【全
+# 缓冲】的，容器非 TTY 时这些消息会在父进程退出时随缓冲区一起丢掉 ——
+# 这就是日志里看不到任何启动器进度、也看不到 "Port conflict detected" 的原因。
+# 启动器还带 "Continue? [y/N]" 交互询问，非 TTY 下读 stdin 立即 EOF。
+NW_APP="$APP_DIR"
+NW_USERDATA="$SERVER_DIR/user-data"
+NW_LIB="$SERVER_DIR/.host/lib:$SERVER_DIR/.host"
+NW_COMMON_ARGS="--nwapp=$NW_APP --user-data-dir=$NW_USERDATA --ozone-platform=x11 --ozone-platform-hint=x11 --no-sandbox --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu --disable-dev-shm-usage --in-process-gpu"
+
+# ------------------------------------------- 可选：NW.js 最小窗口自检
+# 目的：把「NW.js/Chromium 在本容器能否创建窗口」与「MixSuite 应用层是否有问题」
+# 一刀切开。CI 冒烟测试用桩替换了 MixlyServer，真实 Chromium 从未被验证过，
+# 所以 CI 全绿不等于镜像依赖齐备。
+# 用法：docker run -e MIXLY_NW_SELFTEST=1 ...，容器只做自检然后退出。
+if [ "${MIXLY_NW_SELFTEST:-0}" = "1" ]; then
+    ST="$APP_DIR/runtime/nw-selftest"
+    rm -rf "$ST"
+    mkdir -p "$ST"
+    cat > "$ST/package.json" <<'PKG'
+{
+  "name": "nw-selftest",
+  "main": "index.html",
+  "window": { "width": 400, "height": 300, "show": true }
+}
+PKG
+    cat > "$ST/index.html" <<'HTM'
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>nw-selftest</title></head>
+<body><h3>NW.js window OK</h3><script>
+(function () {
+  function done() {
+    try {
+      var fs = require('fs');
+      fs.writeFileSync(require('path').join(__dirname, 'selftest.ok'), 'ok\n');
+    } catch (e) {}
+    try { nw.App.quit(); } catch (e2) {}
+  }
+  if (document.readyState === 'complete' || document.readyState === 'interactive') setTimeout(done, 200);
+  else window.addEventListener('DOMContentLoaded', function () { setTimeout(done, 200); });
+})();
+</script></body></html>
+HTM
+    chmod -R a+rwX "$ST" 2>/dev/null || true
+    log "[自检] 正在以最小 NW.js 应用测试窗口创建（约 40s 上限）..."
+    log "[自检] X 显示: $DISPLAY；Xvfb PID: $XVFB_PID"
+    _st_rc=0
+    ( cd "$ST" && LD_LIBRARY_PATH="$NW_LIB" timeout 40 "$SERVER_DIR/.host/nw" \
+        --nwapp="$ST" --user-data-dir="$SERVER_DIR/user-data" \
+        --ozone-platform=x11 --ozone-platform-hint=x11 --no-sandbox \
+        --disable-setuid-sandbox --disable-gpu-sandbox --disable-gpu \
+        --disable-dev-shm-usage --in-process-gpu \
+        --enable-logging=stderr ) || _st_rc=$?
+    if [ -f "$ST/selftest.ok" ]; then
+        log "[自检] ✅ 通过：NW.js 能在本容器创建窗口并加载页面（退出码 $_st_rc）。"
+        log "[自检] 结论：镜像运行时依赖齐备，问题出在 MixSuite 应用层，"
+        log "[自检]       请用 MIXLY_DIRECT_NW=1 取得 Chromium 内部日志后再定位。"
+    else
+        log "[自检] ❌ 失败：窗口未创建成功（退出码 $_st_rc）。"
+        log "[自检] 结论：NW.js/Chromium 在本容器建不了窗口，属镜像运行时依赖问题。"
+        log "[自检] 请把本段完整日志（含上面的 stderr）反馈，以便补依赖。"
+    fi
+    log "[自检] 关键线索：若上方出现 'XGetWindowAttributes failed' / 'cannot open display'"
+    log "[自检] / 'Failed to connect to the bus' 之外的其他错误，即为直接原因。"
+    exit 0
+fi
+
+# ------------------------------------------- 可选：直连 NW.js（跳过官方启动器）
+# 官方 MixlyServer 是 fork+execv 的壳：父进程打印进度但 stdout 全缓冲会丢，
+# 且带 "Continue? [y/N]" 询问（非 TTY 下 EOF）。当 MixIO 在 120s 内起不来、
+# 或进程几秒就退出时，启动器这一层只会让日志更少。
+# MIXLY_DIRECT_NW=1 时直接 exec .host/nw，并额外打开 Chromium 内部日志
+# （--enable-logging=stderr），把「窗口为什么是 0 / 为什么退出」打出来。
+if [ "${MIXLY_DIRECT_NW:-0}" = "1" ]; then
+    log "[直连模式] 跳过官方 MixlyServer 启动器，直接运行 .host/nw"
+    log "[直连模式] 已追加 --enable-logging=stderr，Chromium 内部日志会全部输出"
+    log "[直连模式] 若要恢复官方启动器，去掉 -e MIXLY_DIRECT_NW=1 即可"
+    cd "$SERVER_DIR"
+    trap 'kill -TERM "$MIXLY_PID" 2>/dev/null || true' TERM INT
+    _t0=$(date +%s)
+    ( export LD_LIBRARY_PATH="$NW_LIB"
+      # shellcheck disable=SC2086
+      "$SERVER_DIR/.host/nw" $NW_COMMON_ARGS --enable-logging=stderr ) &
+    MIXLY_PID=$!
+    _rc=0
+    wait "$MIXLY_PID" || _rc=$?
+    _uptime=$(( $(date +%s) - _t0 ))
+    log "NW.js 进程已退出，退出码: $_rc（本次存活 ${_uptime}s）"
+    exit "$_rc"
+fi
 
 # ------------------------------------------- MixIO 日志转发 + 就绪状态播报
 # NW.js 会吞掉 mixio.js 的 console.log，它的真实启动过程只写在
@@ -549,13 +656,25 @@ case "$_rc" in
              log "  ▸ 存活仅 ${_uptime}s（远小于 120s），排除'就绪探测超时'。"
              log "  ▸ 这是 NW.js「所有窗口被关闭即自动退出」：窗口提前销毁，"
              log "    而 nw-boot.html 自身永远不会主动退出（其 onTimeout 只改文案）。"
-             log "  ▸ 已实测的两条触发路径："
-             log "      a) MixIO 的端口清理逻辑按残留 PID 误杀 Xvfb"
-             log "         （mixio.js:7502 读 pid.info 后 SIGKILL）→ DISPLAY 失效"
-             log "      b) X 显示环境异常，窗口创建后立即销毁"
-             log "  ▸ 若上方有 [Xvfb ... 被杀] 的 ERROR 块，即可确认是 (a)。"
-             log "  ▸ 也可执行: docker exec <容器> sh -c 'dmesg | tail -30'"
-             log "  ▸ 以及:      docker exec <容器> sh -c 'cat /proc/$(pgrep -f Xvfb | head -1)/status' 2>/dev/null"
+             log "  ▸ 已确认的事实：mixio.js 加载成功、init() 通过（本次无新"
+             log "    nw-main-error.log），所以故障在 NW 壳/窗口层，不在 MixIO 初始化。"
+             log "  ▸ 关键证据在 stderr：'XGetWindowAttributes failed for window 0'"
+             log "    —— 窗口句柄是 0，说明窗口从未真正创建成功，随后被销毁。"
+             log "  ▸ 已排除的猜测（实测证伪，不要再往这个方向查）："
+             log "      - 残留 PID 误杀 Xvfb：pid.info 里的旧 PID(如 203)在容器内"
+             log "        并不存在，kill 只会 ESRCH；且 Xvfb 全程存活、无被杀记录。"
+             log "      - /dev/shm 不足：那会得到退出码 139(SIGSEGV)，不是 0。"
+             log "      - 证书：package.json 已含 --ignore-certificate-errors。"
+             log "  ▸ 下一步取证（按顺序，二选一即可）："
+             log "    1) 环境自检：docker run -e MIXLY_NW_SELFTEST=1 ..."
+             log "       用最小 NW 应用测本容器能否创建窗口，直接区分"
+             log "       「镜像依赖问题」与「MixSuite 应用层问题」。"
+             log "    2) 内部日志：docker run -e MIXLY_DIRECT_NW=1 ..."
+             log "       跳过官方启动器直连 .host/nw，并打开 Chromium 内部日志"
+             log "       (--enable-logging=stderr)，窗口为何是 0 会直接说出来。"
+             log "  ▸ 注意：官方 MixlyServer 启动器是 fork+execv，父进程 stdout 在"
+             log "    管道下全缓冲，其 'Checking ports / Starting NW runtime' 等进度"
+             log "    会随缓冲区一起丢失 —— 日志里看不到它们属正常，不代表没执行。"
          else
              log "  ▸ 最常见原因：启动器就绪探测（约 120 次 x 500ms）超时后放弃。"
              log "  ▸ 这几乎总是意味着 MixIO 内部初始化抛错且异常被吞掉。"

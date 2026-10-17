@@ -567,4 +567,70 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t14_fail" ] || fail "T14 $t14_fail"
 ok "T14 启动前端口快照已输出（Xvfb 误杀链的可观测前提）"
 
-echo "🎉 冒烟测试全部通过: $PASS/14"
+echo "=== T15 直连 NW.js 模式（MIXLY_DIRECT_NW=1，绕过官方启动器取 Chromium 内部日志）==="
+# 背景：官方 MixlyServer 是 fork+execv 的壳，父进程 stdout 在管道下全缓冲，
+# 其 "Checking ports / Starting NW runtime / Loading MixIO service" 进度会随
+# 缓冲区丢失，连 "Port conflict detected" 都看不到；还带 "Continue? [y/N]"
+# 询问（非 TTY 下读 stdin 立即 EOF）。当进程几秒就退出、日志又一片空白时，
+# 启动器这一层只会让可观测性更差。
+# MIXLY_DIRECT_NW=1 直接 exec .host/nw 并追加 --enable-logging=stderr，
+# 把「窗口句柄为何是 0 / 为何退出」交给 Chromium 自己说。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cid=$(docker run -d -e MIXLY_DIRECT_NW=1 -v "$tmp:/opt/mixly_server" "$IMAGE")
+t15_fail=""
+wait_log "$cid" "直连模式" 60 || t15_fail="未进入直连模式"
+if [ -z "$t15_fail" ]; then
+    log_has "$cid" "跳过官方 MixlyServer 启动器，直接运行 \.host/nw" \
+        || t15_fail="未声明跳过官方启动器"
+    log_has "$cid" "已追加 --enable-logging=stderr" \
+        || t15_fail="未声明追加 Chromium 内部日志开关"
+    # 直连模式必须真的把 .host/nw 拉起来（桩会打印自己的标记）
+    log_has "$cid" "stub MixlyServer running" \
+        || t15_fail="直连模式未启动 .host/nw"
+fi
+if [ -z "$t15_fail" ]; then
+    docker stop "$cid" >/dev/null 2>&1 || true
+    sleep 2
+    log_has "$cid" "NW.js 进程已退出，退出码" \
+        || t15_fail="未捕获 NW.js 退出码"
+fi
+if [ -n "$t15_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t15_fail" ] || fail "T15 $t15_fail"
+ok "T15 直连模式跳过官方启动器、启动 .host/nw 并打开 Chromium 内部日志"
+
+echo "=== T16 NW.js 最小窗口自检（MIXLY_NW_SELFTEST=1，区分环境问题与应用层问题）==="
+# CI 冒烟测试一直用桩替换 MixlyServer，真实 Chromium 从未被验证过，
+# 所以「CI 全绿」不等于镜像运行时依赖齐备。自检模式用一个最小 NW 应用
+# （临时 package.json + index.html）测本容器能否创建窗口并加载页面：
+# 通过 → 依赖齐备，问题在 MixSuite 应用层；失败 → 属镜像依赖问题。
+# 桩不知道自检语义，用 MIXLY_STUB_EXIT=0 让它尽快退出，避免等满 timeout。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cid=$(docker run -d -e MIXLY_NW_SELFTEST=1 -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
+t16_fail=""
+wait_log "$cid" "自检" 60 || t16_fail="未进入自检模式"
+if [ -z "$t16_fail" ]; then
+    log_has "$cid" "正在以最小 NW\.js 应用测试窗口创建" \
+        || t16_fail="未开始最小窗口自检"
+    log_has "$cid" "X 显示: :99" \
+        || t16_fail="未报告自检所用的 X 显示"
+    # 必须给出结论（通过/失败二选一），不能静默
+    log_has "$cid" "结论" \
+        || t16_fail="自检未给出结论"
+fi
+if [ -n "$t16_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t16_fail" ] || fail "T16 $t16_fail"
+ok "T16 最小窗口自检模式可用（一次区分镜像依赖问题与 MixSuite 应用层问题）"
+
+echo "🎉 冒烟测试全部通过: $PASS/16"
