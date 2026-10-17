@@ -89,7 +89,7 @@ ok "T1 缺包时输出 MixSuite 放置指引并退出 (exit=$rc)"
 echo "=== T2 启动链路（架构匹配的 x64 桩：Xvfb + 前台 exec + 数据目录）==="
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t2_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t2_fail="桩二进制未被 exec 执行"
 if [ -z "$t2_fail" ]; then
@@ -154,7 +154,7 @@ make_pkg "$tmp" x86_64
 mkdir -p "$tmp/user-data"
 touch "$tmp/user-data/leftover"          # 预置 root 属主的残留文件
 chmod 755 "$tmp/user-data"               # 预置 other 只读（典型挂载卷语义）
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t2b_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t2b_fail="桩二进制未被 exec 执行"
 if [ -z "$t2b_fail" ]; then
@@ -219,7 +219,7 @@ ok "T4 Entrypoint(tini)、7 个端口、8443 健康检查与诊断工具齐备�
 echo "=== T5 前台运行保活 + docker stop 优雅退出 ==="
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t5_fail=""
 sleep 8
 [ "$(docker inspect -f '{{.State.Running}}' "$cid")" = "true" ] || t5_fail="前台运行中容器不应自行停止"
@@ -242,7 +242,7 @@ echo "=== T6 MixIO 日志转发 + 崩溃退出码捕获 ==="
 # 而 MixIO 的日志只在文件里，用户在 docker logs 里什么都看不到。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-cid=$(docker run -d -e MIXLY_STUB_EXIT=42 -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -e MIXLY_STUB_EXIT=42 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t6_fail=""
 wait_log "$cid" "退出码: 42" 60 || t6_fail="未捕获子进程退出码 42（入口脚本可能仍用 exec 启动）"
 if [ -z "$t6_fail" ]; then
@@ -275,7 +275,7 @@ echo "=== T7 预置 filter.json（mixio.js:6756 静默挂死的根因回归）==
 # 入口脚本必须在启动官方代码之前把 filter.json 预置为合法的 {}。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t7_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t7_fail="桩二进制未被 exec 执行"
 if [ -z "$t7_fail" ] && [ ! -f "$tmp/mixio-app/storage/reserve/filter.json" ]; then
@@ -333,7 +333,7 @@ ERR
 sleep 30
 STUB
 chmod +x "$tmp/MixlyServer"
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t8_fail=""
 wait_log "$cid" "MixIO 加载失败" 60 \
     || t8_fail="未捕获 runtime/nw-main-error.log（MixIO 加载失败时docker logs 无任何线索）"
@@ -359,7 +359,7 @@ echo "=== T9 退出码 0 的诊断指引（按存活时长分流）==="
 # 并按【存活时长】分流：短命(<15s)=NW.js 窗口提前销毁；长命(≈120s)=就绪探测超时。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t9_fail=""
 wait_log "$cid" "退出码: 0" 60 || t9_fail="未捕获退出码 0"
 if [ -z "$t9_fail" ]; then
@@ -394,7 +394,7 @@ echo "=== T10 mixio-app 本身可写 + store/config-certs 预建（EACCES 根因
 # 本用例锁定：mixio-app 目录本身对 mixly 可写、store 与 config/certs 已预建。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t10_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t10_fail="桩二进制未被 exec 执行"
 if [ -z "$t10_fail" ]; then
@@ -454,7 +454,7 @@ ERR
 sleep 30
 STUB
 chmod +x "$tmp/MixlyServer"
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t11_fail=""
 wait_log "$cid" "MixIO 加载失败" 60 || t11_fail="未捕获 runtime/nw-main-error.log"
 if [ -z "$t11_fail" ]; then
@@ -482,7 +482,7 @@ tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
 mkdir -p "$tmp/mixio-app/runtime"
 echo "STALE-ERROR-FROM-PREVIOUS-RUN" > "$tmp/mixio-app/runtime/nw-main-error.log"
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t12_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t12_fail="桩二进制未被 exec 执行"
 if [ -z "$t12_fail" ]; then
@@ -518,7 +518,7 @@ make_pkg "$tmp" x86_64
 mkdir -p "$tmp/mixio-app/runtime"
 echo "12345" > "$tmp/mixio-app/pid.info"
 echo "12346" > "$tmp/mixio-app/runtime/mixio-backend.pid"
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t13_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t13_fail="桩二进制未被 exec 执行"
 if [ -z "$t13_fail" ]; then
@@ -548,7 +548,7 @@ echo "=== T14 Xvfb 存活监控（误杀的直接证据）==="
 # 启动前端口快照 + Xvfb 监控循环都在日志中可见。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
-cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t14_fail=""
 wait_log "$cid" "stub MixlyServer running" 60 || t14_fail="桩二进制未被 exec 执行"
 if [ -z "$t14_fail" ]; then
@@ -654,6 +654,9 @@ echo "=== T17 短命-0 自动取证 + 启动策略轮换（v2.2.0）==="
 #     一种启动方式（轮换 1→2→3→4→1）；
 #   * 非短命-0 退出（如 docker stop）重置计数，下次仍从默认策略 1 开始。
 # 本用例在同一卷上连跑三次验证轮换，再验证 docker stop 后计数重置。
+# 注意：其余依赖官方启动器（MixlyServer 桩）的用例统一 -e MIXLY_STRATEGY=2
+# 固定策略，不受默认策略变化影响；T15/T16 用 MIXLY_DIRECT_NW/MIXLY_NW_SELFTEST
+# 显式模式，同样不参与轮换。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
 t17_fail=""
@@ -700,6 +703,7 @@ fi
 # v2.2.0 起默认策略 1 是直连 .host/nw（桩秒退，活不到 18 秒），所以把计数器
 # 预置为 1，让本次走策略 2（官方启动器 + 长命桩）来验证重置与优雅停止。
 if [ -z "$t17_fail" ]; then
+    mkdir -p "$tmp/mixio-app/runtime"
     echo 1 > "$tmp/mixio-app/runtime/boot-attempt"
     cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
     wait_log "$cid" "stub MixlyServer running" 60 || t17_fail="第 4 次桩二进制未被 exec 执行"

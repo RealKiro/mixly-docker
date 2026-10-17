@@ -706,6 +706,7 @@ fi
 #   * 连续短命-0 失败时，每次重启自动切换一种启动方式（共 4 种，轮换）；
 #   * 其它退出（正常停止/崩溃/超时，即非短命-0）重置计数，下次仍从策略 1 开始；
 #   * 计数文件在挂载卷内（runtime/boot-attempt），跨重启保留；
+#   * MIXLY_STRATEGY=1~4 可显式固定策略（优先级高于计数器，固定期间不动计数器）；
 #   * 显式设置 MIXLY_NW_SELFTEST / MIXLY_DIRECT_NW 时完全听用户的，不介入。
 # 每次启动都打印所用策略；短命失败时自动执行 auto_forensics 取证。
 ATTEMPT_FILE="$APP_DIR/runtime/boot-attempt"
@@ -732,21 +733,35 @@ STRATEGY_DESC="直连 .host/nw（不指定 ozone，Chromium 自动探测 X11；�
   done ) &
 
 if [ "${MIXLY_NW_SELFTEST:-0}" != "1" ] && [ "${MIXLY_DIRECT_NW:-0}" != "1" ]; then
-    _prev=0
-    if [ -f "$ATTEMPT_FILE" ]; then
-        _prev=$(tr -dc '0-9' < "$ATTEMPT_FILE" 2>/dev/null || true)
-        [ -n "$_prev" ] || _prev=0
-        [ "$_prev" -gt 4 ] && _prev=4
+    # MIXLY_STRATEGY=1~4：显式固定启动策略，优先级高于计数器。
+    # 用途：测试锁定，或环境特殊必须固定某种方式（如必须走官方启动器的端口
+    # 预检查）。固定期间不读写计数器，避免打乱后续的自动轮换状态。
+    _STRATEGY_PINNED=0
+    if [ -n "${MIXLY_STRATEGY:-}" ]; then
+        case "$MIXLY_STRATEGY" in
+            1|2|3|4) STRATEGY="$MIXLY_STRATEGY"; _STRATEGY_PINNED=1 ;;
+            *) warn "MIXLY_STRATEGY 只能是 1~4（当前值: $MIXLY_STRATEGY），已忽略，改用计数器" ;;
+        esac
     fi
-    STRATEGY=$((_prev + 1))
-    [ "$STRATEGY" -gt 4 ] && STRATEGY=1
+    if [ "$_STRATEGY_PINNED" != "1" ]; then
+        _prev=0
+        if [ -f "$ATTEMPT_FILE" ]; then
+            _prev=$(tr -dc '0-9' < "$ATTEMPT_FILE" 2>/dev/null || true)
+            [ -n "$_prev" ] || _prev=0
+            [ "$_prev" -gt 4 ] && _prev=4
+        fi
+        STRATEGY=$((_prev + 1))
+        [ "$STRATEGY" -gt 4 ] && STRATEGY=1
+    fi
     case "$STRATEGY" in
         1) STRATEGY_DESC="直连 .host/nw（不指定 ozone，Chromium 自动探测 X11；实测默认）" ;;
         2) STRATEGY_DESC="官方启动器 MixlyServer（stdbuf 行缓冲；Xvfb 下 ozone 参数可致 window 0）" ;;
         3) STRATEGY_DESC="直连 .host/nw（强制 ozone x11，与官方启动器参数一致）" ;;
         4) STRATEGY_DESC="直连 .host/nw（关闭原生窗口遮挡检测 CalculateNativeWinOcclusion）" ;;
     esac
-    echo "$STRATEGY" > "$ATTEMPT_FILE" 2>/dev/null || true
+    if [ "$_STRATEGY_PINNED" != "1" ]; then
+        echo "$STRATEGY" > "$ATTEMPT_FILE" 2>/dev/null || true
+    fi
 fi
 log "启动策略 $STRATEGY/4: $STRATEGY_DESC"
 
@@ -858,10 +873,10 @@ if [ "$_rc" = "0" ] && [ "$_uptime" -lt 15 ] && [ "$_STOP_REQUESTED" != "1" ]; t
 fi
 
 # 策略计数：只有「短命-0」推进策略；其它退出（正常停止/崩溃/超时）重置，
-# 下次重启仍从默认策略（直连无 ozone）开始。
+# 下次重启仍从默认策略（直连无 ozone）开始。MIXLY_STRATEGY 固定期间不动计数器。
 if [ "$_FAST_FAIL" = "1" ]; then
     :
-else
+elif [ "${_STRATEGY_PINNED:-0}" != "1" ]; then
     echo 0 > "$ATTEMPT_FILE" 2>/dev/null || true
 fi
 
@@ -880,8 +895,8 @@ case "$_rc" in
              log "  ▸ 本次启动策略 $STRATEGY/4: $STRATEGY_DESC"
              log "  ▸ 以下为自动取证输出（无需手动执行任何命令）："
              auto_forensics
-             # 记录本次短命失败：下次重启自动切换启动策略（轮换 1→2→3→4→1）
-             echo "$STRATEGY" > "$ATTEMPT_FILE" 2>/dev/null || true
+            # 记录本次短命失败：下次重启自动切换启动策略（轮换 1→2→3→4→1）
+            [ "${_STRATEGY_PINNED:-0}" = "1" ] || echo "$STRATEGY" > "$ATTEMPT_FILE" 2>/dev/null || true
              _next=$((STRATEGY + 1))
              [ "$_next" -gt 4 ] && _next=1
              log "  ▸ 已记录本次失败；下次重启自动切换策略 $_next/4。"
