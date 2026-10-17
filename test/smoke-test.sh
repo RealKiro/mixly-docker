@@ -130,6 +130,12 @@ if [ -z "$t2b_fail" ]; then
         *) t2b_fail="user-data 的 other 位仍不可写（mode=$mode），chmod 兜底未生效" ;;
     esac
 fi
+if [ -z "$t2b_fail" ] && [ ! -d "$tmp/.cache" ]; then
+    # fontconfig 缓存/NSS 库的落点：启动器会覆盖 HOME 为套件根，
+    # 入口脚本需在套件根下预建可写的 .cache / .local/share / .config，
+    # 否则 Chromium 刷 "No writable cache directories"。
+    t2b_fail="未预建套件根下的 .cache（fontconfig 缓存目录，Chromium 会报 No writable cache directories）"
+fi
 if [ -z "$t2b_fail" ]; then
     docker logs "$cid" 2>&1 | grep -q "无法写入.*user-data" \
         && t2b_fail="入口脚本的写入自检未通过"

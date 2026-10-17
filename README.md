@@ -165,6 +165,20 @@ NW.js（Chromium）要在 `user-data` 目录创建 SingletonLock，写不进去�
 
 **用 v2.0.1 及以上镜像即可**（入口脚本已改为 `chmod a+rwX` 权限位兜底 + 启动前实测写入，失败会给出明确诊断而非无限重启）。若你还在用 v2.0，升级镜像后重启容器；`user-data` 里已有的数据不受影响。
 
+**Q9：日志里这些报错要不要管？**
+
+v2.0.2 起，容器正常运行时日志里只会剩下**无害噪音**，可对照下表判断：
+
+| 日志片段 | 性质 |
+|---|---|
+| `dbus/bus.cc: Failed to connect to the bus` / `org.freedesktop.DBus...` | 无害。容器内无 dbus daemon，Chromium 每次启动必报几十行 |
+| `XGetWindowAttributes failed for window 0` | 无害。Xvfb 虚拟显示下的窗口告警 |
+| `chrome_crashpad_handler: --database is required` | 无害。崩溃上报组件，NW.js 自带 |
+| `Fontconfig error: No writable cache directories` / `Failed to create .../pki/nssdb` | **v2.0.1 及更早会出现**；v2.0.2 已预建可写的 `.cache` / `.local/share` 与 XDG 目录，升级后消失 |
+| `handshake failed ... net_error -101` | 离线内网环境下拉取外部 HTTPS 资源失败，属正常。若 `https://IP:8443` 能正常打开界面即可忽略；打不开才需排查 |
+
+判断容器是否真正可用，以「浏览器能否打开 `https://IP:8443`」为准，而不是以日志是否干净为准。
+
 ## 致谢与声明
 
 - [Mixly 米思齐](https://mixly.cn) 及其服务端 [mixly2/mixio](https://gitee.com/mixly2/mixio) —— 本仓库仅提供运行环境适配，Mixly 软件版权归原团队所有，请从官方渠道获取运行包并遵守其使用条款。

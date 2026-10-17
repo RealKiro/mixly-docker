@@ -175,6 +175,25 @@ if [ "$(id -u)" = "0" ]; then
     export HOME="/tmp/mixly-home"
     mkdir -p "$HOME" && chown mixly:mixly "$HOME"
 
+    # XDG 目录：fontconfig 缓存（"No writable cache directories"）、NSS 数据库
+    #（Failed to create .../.local/share/pki/nssdb）都依赖它们可写。
+    # MixlyServer 启动器会自行把 HOME 改写为套件根目录，所以除了 XDG 变量，
+    # 下面还要在挂载根下预建同名目录并放开权限，双保险。
+    for _x in "$HOME/.cache" "$HOME/.config" "$HOME/.local/share" "$HOME/.state"; do
+        mkdir -p "$_x"
+        chown -R mixly:mixly "$_x" 2>/dev/null || true
+        chmod -R a+rwX "$_x"
+    done
+    export XDG_CACHE_HOME="$HOME/.cache"
+    export XDG_CONFIG_HOME="$HOME/.config"
+    export XDG_DATA_HOME="$HOME/.local/share"
+    export XDG_STATE_HOME="$HOME/.state"
+    # 兜底：启动器覆盖 HOME 后 fontconfig/NSS 会落到套件根下，这里先铺好可写目录
+    for _x in "$SERVER_DIR/.cache" "$SERVER_DIR/.local/share" "$SERVER_DIR/.config"; do
+        mkdir -p "$_x"
+        chmod -R a+rwX "$_x"
+    done
+
     # 清理上次异常退出可能残留的 ProcessSingleton 文件（属主/权限不对时
     # Chromium 连 unlink 旧 lock 都做不到，会一直报 Permission denied）。
     rm -f "$SERVER_DIR/user-data/SingletonLock" \
