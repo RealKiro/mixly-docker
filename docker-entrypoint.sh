@@ -163,6 +163,12 @@ if [ "$(id -u)" = "0" ]; then
     export HOME="/tmp/mixly-home"
     mkdir -p "$HOME" && chown mixly:mixly "$HOME"
 
+    # 保证降权后的 mixly 用户能进入套件根目录：mktemp 或严格 umask 解压出来的
+    # 根目录可能是 700（属主是宿主机用户），root 能进但 mixly 不能，二次执行时
+    # 连运行包都检测不到（报"未检测到 Mixly 官方运行包"后退出）。
+    # 只追加「其他用户可读+可进入」，属主不变，不影响宿主机用户的管理权限。
+    chmod o+rx "$SERVER_DIR" 2>/dev/null || true
+
     exec gosu mixly:mixly "$0" "$@"
 fi
 
