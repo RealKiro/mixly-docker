@@ -247,9 +247,17 @@ done
 log "Xvfb 虚拟显示已就绪: $DISPLAY"
 
 # ---------------------------------------------------------------- 启动服务
-# MixlyServer 前台运行：内部 exec .host/nw（--no-sandbox --disable-gpu
-# --user-data-dir=<套件根>/user-data）加载 mixio-app，MixIO 服务在 NW 进程内
-# 运行，SIGTERM/SIGINT 由应用自行优雅处理，直接 exec 交给 tini 转发信号。
+# MixlyServer 内 exec .host/nw（--no-sandbox --disable-gpu --user-data-dir=…）
+# 加载 mixio-app；nw-main.js 会设 MIXIO_NW_SPAWN=1 后同进程 require mixio.js，
+# 使其走 args=['debug'] 的前台分支（daemon_start + startOnce），服务不 spawn
+# 子进程、与容器同生命周期，SIGTERM 由 tini 转发、应用自行优雅退出。
+#
+# MIXIO_DISABLE_NTP=1：容器内非 root 无法绑定特权端口 123（仅告警，但会刷日志），
+# 显式跳过 NTP 仿真（mixio.js 认这个开关）。
+# MIXIO_SHELL_DAEMON=1：官方给"前台运行"的开关，双保险（NW 路径本已前台）。
+export MIXIO_SHELL_DAEMON=1
+export MIXIO_DISABLE_NTP=1
 log "正在启动 MixlyServer（MixIO 服务将在 NW.js 进程内运行）..."
+log "访问入口: https://<本机IP>:8443（HTTPS，自签证书）/ 管理: https://<本机IP>:18084"
 cd "$SERVER_DIR"
 exec "./$BIN_NAME"

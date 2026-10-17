@@ -179,6 +179,29 @@ v2.0.2 起，容器正常运行时日志里只会剩下**无害噪音**，可对
 
 判断容器是否真正可用，以「浏览器能否打开 `https://IP:8443`」为准，而不是以日志是否干净为准。
 
+**Q10：容器显示 running，但网页打不开（服务没起来）怎么排查？**
+
+NW.js 外壳活着**不等于** MixIO 服务已就绪——初始化卡住时容器状态照样是 running。v2.0.3 起镜像带健康检查，按顺序看这三步：
+
+```bash
+# 1) 状态列：healthy = 8443 已有 MixIO 在服务；unhealthy/starting = 还没就绪
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+# 2) MixIO 自己的启动日志（关键，NW 会把 console.log 吞进这个文件）
+docker exec <容器名> sh -c 'tail -n 50 /opt/mixly_server/mixio-app/logs/*.log'
+
+# 3) 端口到底有没有监听（8443=HTTPS 主入口，18084=管理）
+docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
+```
+
+常见原因与对策：
+
+| 第 2 步日志关键字 | 原因 | 对策 |
+|---|---|---|
+| `Downloading certificate from https://mixly.org/...` 后卡住 / 反复 handshake 失败 | 离线内网拉不到官方证书（每个 5 秒超时，共两次） | 等 10~30 秒；急用可断开启动时的外网请求，或在 `mixio-app/config/config.json` 把 `HTTPS_CRT_FILE`/`HTTPS_PRIVATE_PEM` 指向本地证书文件（不填 http:// 开头即走本地路径） |
+| 无日志、`logs/` 为空 | MixIO 还没进入初始化 | 先确认第 1 步不是 `starting`，再看第 3 步端口 |
+| `EADDRINUSE` / 端口被占 | 同容器内端口冲突或旧进程残留 | `docker exec <容器名> sh -c 'cat /opt/mixly_server/mixio-app/pid.info'` 看 PID 是否存在；容器重建即可清干净 |
+
 ## 致谢与声明
 
 - [Mixly 米思齐](https://mixly.cn) 及其服务端 [mixly2/mixio](https://gitee.com/mixly2/mixio) —— 本仓库仅提供运行环境适配，Mixly 软件版权归原团队所有，请从官方渠道获取运行包并遵守其使用条款。

@@ -53,6 +53,7 @@ RUN apt-get update \
         libxrender1 libxss1 libxtst6 libxkbcommon0 \
         fonts-wqy-zenhei \
         ca-certificates tzdata tini gosu \
+        curl procps net-tools \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r mixly \
     && useradd -r -g mixly -d /opt/mixly_server -s /usr/sbin/nologin mixly
@@ -69,5 +70,12 @@ ENV TZ=Asia/Shanghai \
 # 8443 HTTPS 主入口（MixSuite 强制 HTTPS，无 HTTP 端口）
 # 18084 管理模式 | 1883 MQTT | 8083/8084 WS/WSS | 8082/8086 Yjs 协同
 EXPOSE 8443 18084 1883 8083 8084 8082 8086
+
+# 健康检查：直接探测 8443 是否有 MixIO 在服务。
+# NW.js 外壳活着 ≠ MixIO 服务已就绪（初始化卡住时容器仍是 running 但网页打不开），
+# 这个检查让 `docker ps` 的 STATUS 列如实显示 healthy / unhealthy，不用猜日志。
+# 宽限期 180s：首次启动要初始化 SQLite、拉证书（离线时会超时）、起 NW 壳，较慢属正常。
+HEALTHCHECK --interval=30s --timeout=8s --start-period=180s --retries=3 \
+    CMD curl -ksf -o /dev/null --max-time 6 https://127.0.0.1:8443/ || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]

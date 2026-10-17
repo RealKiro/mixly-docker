@@ -169,7 +169,16 @@ for p in 8443 18084 1883 8082 8083 8084 8086; do
     echo "$ports" | grep -q "\"$p/tcp\"" || fail "T4 缺少端口声明 $p: $ports"
 done
 echo "$ports" | grep -q "\"8080/tcp\"" && fail "T4 MixSuite 强制 HTTPS，不应再暴露 8080" || true
-ok "T4 Entrypoint(tini) 与 7 个端口声明正确（无 8080）"
+# 健康检查：NW 壳活着不代表 MixIO 就绪，这个探针让 docker ps 如实显示服务状态
+hc=$(docker inspect -f '{{json .Config.Healthcheck}}' "$IMAGE")
+echo "$hc" | grep -q "curl" || fail "T4 缺少 8443 健康检查: $hc"
+echo "$hc" | grep -q "127.0.0.1:8443" || fail "T4 健康检查未探测 8443: $hc"
+# 诊断工具：容器内排查（看端口/进程/日志）需要它们
+for t in curl ps netstat; do
+    docker run --rm --entrypoint sh "$IMAGE" -c "command -v $t" >/dev/null 2>&1 \
+        || fail "T4 镜像缺少诊断工具 $t"
+done
+ok "T4 Entrypoint(tini)、7 个端口、8443 健康检查与诊断工具齐备（无 8080）"
 
 echo "=== T5 前台运行保活 + docker stop 优雅退出 ==="
 tmp=$(mktemp -d)
