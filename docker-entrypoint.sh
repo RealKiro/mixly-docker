@@ -167,6 +167,41 @@ if [ "$(id -u)" = "0" ]; then
         "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \
         "$APP_DIR/runtime" "$SERVER_DIR/user-data" 2>&1 | tr '\n' ' ')"
 
+    # -------------------------------------------------- 关键：预置 filter.json
+    # MixIO 启动链里有若干处「假定文件已存在」的裸同步读写，缺文件即抛异常：
+    #
+    #   mixio.js:6626  filterPath = <storage>/reserve/filter.json
+    #   mixio.js:6756  JSON.parse(fs.readFileSync(filterPath))   ← 无 try/catch
+    #
+    # 这两行在 async函数 mixioServer() 内，而调用它的是
+    #   daemon_start().then(() => startOnce())        （mixio.js:7683，无 .catch）
+    # 于是异常被彻底吞掉：不打印、不退出、8443 永不监听，
+    # 最终 nw-boot.html 探测 120 次（约 60~120s）后放弃、退出码 0，
+    # Docker 重启策略再拉起—— 表现就是「容器每隔一两分钟自己重启一次，
+    # docker logs 里什么都看不到」，与当前故障完全一致。
+    #
+    # 成因：官方仅在 storage 目录【不存在】时才创建 filter.json（mixio.js:929），
+    # 但 Docker 下 storage 由本脚本为chown/chmod 而预建，init 便判定
+    # 「已初始化过」而跳过创建，6756 行读到 ENOENT 即炸。
+    #
+    # 对策：在官方代码之前把 filter.json 预置为合法的 {}。
+    # 只写官方本身也会写的内容，不改官方包、不改其语义。
+    RESERVE_DIR="$APP_DIR/storage/reserve"
+    mkdir -p "$RESERVE_DIR"
+    chown -R mixly:mixly "$RESERVE_DIR" 2>/dev/null || true
+    chmod -R a+rwX "$RESERVE_DIR"
+    if [ ! -f "$RESERVE_DIR/filter.json" ]; then
+        if printf '{}' > "$RESERVE_DIR/filter.json" 2>/dev/null; then
+            log "已预置 storage/reserve/filter.json（缺失会让 mixio.js:6756 抛错并静默挂死）"
+        else
+            warn "预置 filter.json 失败；若服务反复重启请检查 $RESERVE_DIR 是否可写"
+        fi
+    elif ! grep -q '^[[:space:]]*[{[]' "$RESERVE_DIR/filter.json" 2>/dev/null; then
+        # 官方会往里写 userName->bool，必须是合法 JSON，否则同样炸在 6756
+        warn "filter.json 内容不是合法 JSON（mixio.js:6756 会抛错），已重置为 {}"
+        printf '{}' > "$RESERVE_DIR/filter.json" 2>/dev/null || true
+    fi
+
     # zip 解压后常丢失执行位；firstrun.sh 亦要求对这三个文件 chmod +x
     chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" \
         "$SERVER_DIR/.host/chrome_crashpad_handler" 2>/dev/null || true
@@ -293,9 +328,38 @@ if [ "$(id -u)" != "0" ]; then
             tail -n 0 -F "$APP_DIR/logs"/*.log 2>/dev/null | sed -u 's/^/[mixio] /' ) &
     fi
     log "已启用 MixIO 日志转发（日志行前缀 [mixio]，日志文件出现后即自动跟随）"
+
+    # ---- 捕获 nw-main-error.log：mixio.js 加载失败的唯一落盘证据 ----
+    # nw-main.js 在 require('./mixio.js') 抛错时，会把完整 stack 写入
+    # mixio-app/runtime/nw-main-error.log。这是「顶层 require 失败」这类
+    # 致命错误的唯一可观测点，但它不会出现在 docker logs 里，必须主动跟随。
+    # 典型内容：Cannot find module 'node:sqlite' —— NW.js 内置 Node 版本
+    # 过旧时，sqlite-native.js 顶层的 require('node:sqlite') 会直接失败，
+    # 整个 mixio.js 加载中止，服务永远起不来。
+    ( _werr=0
+      while [ "$_werr" -lt 180 ]; do
+          sleep 1
+          if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
+              echo "" >&2
+              echo "=========================================================" >&2
+              echo "[entrypoint][ERROR] MixIO 加载失败！以下是 nw-main.js 记录的完整错误：" >&2
+              echo "=========================================================" >&2
+              cat "$APP_DIR/runtime/nw-main-error.log" >&2
+              echo "=========================================================" >&2
+              echo "[entrypoint][ERROR] 常见原因：NW.js 内置 Node 版本不支持 node:sqlite" >&2
+              echo "[entrypoint][ERROR] （mixio.js 依赖 SQLite 存储引擎）。请把本段日志反馈给官方。" >&2
+              echo "=========================================================" >&2
+              break
+          fi
+          _werr=$((_werr + 1))
+      done ) &
 fi
 
 # 就绪播报：40s 起每 30s 检查一次 8443，未监听就明确提示（含排查位置）
+#
+# 时间窗口很关键：nw-boot.html 最多探测 120 次 x 500ms（约 60s），受网络/CPU
+# 影响实测可到 120s+，超时后应用主动退出码 0。所以在它自杀之前必须
+# 把「为什么没起来」讲清楚，否则重启循环里只有一片空白。
 ( _n=0
   while [ "$_n" -lt 20 ]; do
       sleep 30
@@ -304,10 +368,22 @@ fi
           exit 0
       fi
       _n=$((_n + 1))
-      [ "$_n" = "1" ] && log "就绪检查: 启动已 40s，8443 仍未监听（首次启动要初始化数据库、拉取证书，请耐心等待）"
-      [ "$_n" -eq 2 ] && log "就绪检查: 80s 仍未监听；若日志无 [mixio] 输出说明日志目录未生成，见 README FAQ Q10"
+      [ "$_n" = "1" ] && log "就绪检查: 启动已 40s，8443 仍未监听（首次启动要初始化数据库，请耐心等待）"
+      [ "$_n" -eq 2 ] && log "就绪检查: 80s 仍未监听；若日志无[mixio] 输出说明日志目录未生成，见 README FAQ Q10"
+      [ "$_n" -ge 3 ] && [ "$_n" -le 4 ] && \
+          log "就绪检查: $((_n * 30))s 仍未监听。NW.js 最多等待约 120s，超时后会自行退出并被重启策略拉起"
+      if [ "$_n" -ge 3 ]; then
+          # 直接把可观测证据打出来：用户不必再手动 docker exec
+          if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
+              log "诊断: 检测到 runtime/nw-main-error.log（MixIO 加载失败），完整内容已打印在上方"
+          fi
+          log "诊断: storage=$(ls "$APP_DIR/storage" 2>/dev/null | tr '\n' ' ')reserve=$(ls "$APP_DIR/storage/reserve" 2>/dev/null | tr '\n' ' ')"
+      fi
   done
-  log "就绪检查: 10 分钟内 8443 始终未监听，请执行 docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/logs/*.log' 获取 MixIO 日志" ) &
+  log "就绪检查: 10 分钟内 8443 始终未监听。请执行："
+  log "  docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/logs/*.log'"
+  log "  docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log'"
+  log "  docker exec <容器> sh -c 'netstat -lntp | grep -E \"8443|18084\"'" ) &
 
 cd "$SERVER_DIR"
 # 这里刻意【不用 exec】：保留退出码并转发信号。MixlyServer 静默退出是当前最需要
@@ -322,7 +398,17 @@ _rc=0
 wait "$MIXLY_PID" || _rc=$?
 log "MixlyServer 进程已退出，退出码: $_rc"
 case "$_rc" in
-    0)   log "退出码 0：应用主动退出（若非预期，请检查是否被 mixio-app/config 里的自动更新触发）" ;;
+    0)   log "退出码 0 = 应用主动退出。最常见原因：启动器就绪探测（约 120 次 x 500ms）超时后放弃。"
+         log "       这几乎总是意味着 MixIO 内部初始化抛错且异常被吞掉，并非'正常退出'。"
+         if [ -s "$APP_DIR/runtime/nw-main-error.log" ]; then
+             log "       >>> 已有 runtime/nw-main-error.log，其内容已打印在上方"
+         else
+             log "       >>> 若上方无任何 [mixio] 输出，说明 mixio.js 加载后在init/daemon_start 阶段静默失败"
+             log "       >>> 依次执行以下命令取证（把输出反馈给官方）："
+             log "           docker exec <容器> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log'"
+             log "           docker exec <容器> sh -c 'ls -laR /opt/mixly_server/mixio-app/storage'"
+             log "           docker exec <容器> sh -c 'netstat -lntp'"
+         fi ;;
     139) log "退出码 139 = SIGSEGV（段错误崩溃）。常见原因：NW.js/Chromium 在无显示环境下崩溃；可尝试给容器加 --shm-size=1g" ;;
     134) log "退出码 134 = SIGABRT（断言失败/abort 崩溃）。建议查看上方 [mixio] 日志的最后几行" ;;
     143) log "退出码 143 = SIGTERM（收到停止信号，正常退出）" ;;

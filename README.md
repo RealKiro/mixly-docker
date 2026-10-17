@@ -170,6 +170,8 @@ NW.js（Chromium）要在 `user-data` 目录创建 SingletonLock，写不进去�
 
 **用 v2.0.1 及以上镜像即可**（入口脚本已改为 `chmod a+rwX` 权限位兜底 + 启动前实测写入，失败会给出明确诊断而非无限重启）。若你还在用 v2.0，升级镜像后重启容器；`user-data` 里已有的数据不受影响。
 
+>补充：升级到最新版（v2.0.6+）后请直接用 `latest`。若容器仍在重启，先排除这一类权限问题，再看Q11——两者的日志特征完全不同（Q8 有 `SingletonLock: Permission denied`，Q11 一片空白）。
+
 **Q9：日志里这些报错要不要管？**
 
 v2.0.2 起，容器正常运行时日志里只会剩下**无害噪音**，可对照下表判断：
@@ -206,8 +208,57 @@ docker exec <容器名> netstat -tlnp | grep -E '8443|18084'
 | `Downloading certificate from https://mixly.org/...` 后卡住 / 反复 handshake 失败 | 离线内网拉不到官方证书（每个 5 秒超时，共两次） | 等 10~30 秒；急用可断开启动时的外网请求，或在 `mixio-app/config/config.json` 把 `HTTPS_CRT_FILE`/`HTTPS_PRIVATE_PEM` 指向本地证书文件（不填 http:// 开头即走本地路径） |
 | 无日志、`logs/` 为空 | MixIO 还没进入初始化 | 先确认第 1 步不是 `starting`，再看第 3 步端口 |
 | `EADDRINUSE` / 端口被占 | 同容器内端口冲突或旧进程残留 | `docker exec <容器名> sh -c 'cat /opt/mixly_server/mixio-app/pid.info'` 看 PID 是否存在；容器重建即可清干净 |
-| 容器每隔 1~2 分钟静默重启一次，日志无任何报错（连 `[mixio]` 都没有） | **`/dev/shm` 太小导致 Chromium 渲染进程崩溃**（Docker 默认仅 64MB） | 用 `docker run` 时加 `--shm-size=1g`；compose 用 `shm_size: '1gb'`；同时给容器留 1.5GB+ 内存 |
-| 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | 同上；这条警告出现时静默重启基本可确定是它 |
+| 日志出现「警告: /dev/shm 仅 64MB」 | 入口脚本已检测到共享内存不足 | compose 加 `shm_size: '1gb'`、`docker run` 加 `--shm-size=1g`，并留1.5GB+ 内存 |
+| 容器约 120 秒后重启、退出码 0、日志无任何报错（连 `[mixio]` 都没有） | **MixIO 初始化抛错且异常被吞**，见下方 Q11 | 按Q11 逐条取证；多数情况升级到 v2.0.6 即可 |
+
+**Q11：容器每隔约 120 秒自动重启，退出码 0，`docker logs` 完全空白**
+
+这是 Mixly 4.0 官方包在容器里的一个已知启动链缺陷，**不是你的配置错了**，也不是 `/dev/shm` 或证书问题。根因在 `mixio-app/mixio.js`：
+
+```
+ mixio.js:929    if (!fs.existsSync(storage)) { ...建库、写 filter.json... }
+ mixio.js:6626   filterPath = <storage>/reserve/filter.json
+ mixio.js:6756   JSON.parse(fs.readFileSync(filterPath))     ← 无 try/catch
+ mixio.js:7683   daemon_start().then(() => startOnce())     ← 无 .catch
+ nw-boot.html    探测 8443，120 次 × 500ms 失败后放弃 → 退出码 0
+```
+
+官方**只在 `storage` 目录不存在时**才创建 `filter.json`；而容器为了 `chown`/`chmod` 会预先建好 `storage`，官方因此认为「已初始化」而跳过创建 → 6756 行读 `filter.json` 得到 `ENOENT` 并抛错 → 由于 `.then()` 没有 `.catch()`，异常被彻底吞掉：不打印、不退出、8443 永不监听 → 启动器探测约 120 秒后放弃、退出码 0 → 重启策略再拉起。
+
+**v2.0.6 起镜像已自动预置 `storage/reserve/filter.json`，多数情况下升级镜像即可正常启动：**
+
+```bash
+# 1) 换成新镜像
+docker rm -f <容器名>
+docker run -d --name <容器名> --restart unless-stopped --shm-size=1g \
+  -p 8443:8443 -p 18084:18084 -p 1883:1883 -p 8083:8083 -p 8084:8084 -p 8082:8082 -p 8086:8086 \
+  -v /你的路径/mixly_server:/opt/mixly_server \
+  ghcr.io/realkiro/mixly-server:latest
+
+# 2) 确认这行出现（说明预置成功）
+docker logs <容器名> 2>&1 | grep 已预置
+```
+
+如果升级后仍反复重启，说明是另一类问题，请按下面顺序取证并把结果反馈给官方：
+
+```bash
+# A) mixio.js 顶层加载失败时，nw-main.js 会把完整堆栈写到这个文件
+#    （最常见的具体原因：NW.js 内置 Node 版本不支持 node:sqlite）
+docker exec <容器名> sh -c 'cat /opt/mixly_server/mixio-app/runtime/nw-main-error.log'
+
+# B) 关键数据文件是否齐备（filter.json 必须存在且是合法 JSON）
+docker exec <容器名> sh -c 'ls -la /opt/mixly_server/mixio-app/storage /opt/mixly_server/mixio-app/storage/reserve'
+
+# C) 端口到底有没有起来
+docker exec <容器名> sh -c 'netstat -lntp | grep -E "8443|18084"'
+```
+
+v2.0.6 起入口脚本会自动完成以下动作，不必再手工取证：
+
+- 预置 `storage/reserve/filter.json`（缺失或非法时自动修正为 `{}`）
+- 主动捕获并打印 `runtime/nw-main-error.log` 的完整内容（NW.js 不会把它写进 `docker logs`）
+- 退出码 0 时明确指出「这是就绪探测超时，不是正常退出」并打印取证命令
+- 就绪检查期间输出 `storage` 目录实况
 
 ## 致谢与声明
 

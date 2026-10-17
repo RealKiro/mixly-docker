@@ -244,4 +244,115 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t6_fail" ] || fail "T6 $t6_fail"
 ok "T6 MixIO 日志转发到 stdout，崩溃退出码 42 被捕获并解读"
 
-echo "🎉 冒烟测试全部通过: $PASS/6"
+echo "=== T7 预置 filter.json（mixio.js:6756 静默挂死的根因回归）==="
+# 官方 mixio.js:929 只在 storage 目录【不存在】时才创建 storage/reserve/filter.json，
+# 而 mixio.js:6756 是裸的 JSON.parse(fs.readFileSync(filterPath))，无 try/catch；
+# 调用它的 daemon_start().then(() => startOnce())（L7683）也没有 .catch。
+# 于是 Docker 下只要 storage 被预建（为chown/chmod），官方就跳过 filter.json，
+# 6756 读到 ENOENT 抛错 → 异常被彻底吞掉 → 8443 永不监听 →
+# nw-boot.html 探测约 120s 后放弃、退出码 0 → 重启策略拉起。
+# 外部表现：容器每隔一两分钟自动重启，docker logs 一片空白。
+# 入口脚本必须在启动官方代码之前把 filter.json 预置为合法的 {}。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t7_fail=""
+wait_log "$cid" "stub MixlyServer running" 60 || t7_fail="桩二进制未被 exec 执行"
+if [ -z "$t7_fail" ] && [ ! -f "$tmp/mixio-app/storage/reserve/filter.json" ]; then
+    t7_fail="未预置 storage/reserve/filter.json（缺失会让 mixio.js:6756 抛错并静默挂死）"
+fi
+if [ -z "$t7_fail" ]; then
+    # 必须是合法 JSON 对象：官方会往里写 userName -> bool
+    grep -q '^[[:space:]]*[{[]' "$tmp/mixio-app/storage/reserve/filter.json" \
+        || t7_fail="预置的 filter.json 不是合法 JSON 对象"
+fi
+if [ -z "$t7_fail" ]; then
+    docker logs "$cid" 2>&1 | grep -q "已预置 storage/reserve/filter.json" \
+        || t7_fail="入口脚本未声明预置 filter.json"
+fi
+if [ -z "$t7_fail" ]; then
+    # reserve 目录本身也必须对 mixly 可写（官方要往里复制 1.db..8.db 并写 filter.json）
+    if ! docker exec "$cid" sh -c \
+        "gosu mixly sh -c 'touch /opt/mixly_server/mixio-app/storage/reserve/.t7'" >/dev/null 2>&1; then
+        t7_fail="mixly 无法写入 storage/reserve（filter.json 与 reserve DB 无法创建）"
+    else
+        docker exec "$cid" rm -f /opt/mixly_server/mixio-app/storage/reserve/.t7 >/dev/null 2>&1 || true
+    fi
+fi
+if [ -n "$t7_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+    echo "----- 宿主机 storage 视图 -----"
+    ls -laR "$tmp/mixio-app/storage" 2>&1 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t7_fail" ] || fail "T7 $t7_fail"
+ok "T7 filter.json 已预置且 reserve 目录对 mixly 可写（静默挂死根因已覆盖）"
+
+echo "=== T8 nw-main-error.log 捕获（MixIO 加载失败的唯一证据）==="
+# nw-main.js 在 require('./mixio.js') 抛错时把完整 stack 写入
+# mixio-app/runtime/nw-main-error.log，但它不会出现在 docker logs 里。
+# 若入口脚本不主动捕获，用户就只能看到「容器重启但零日志」。
+# 这里让桩模拟顶层 require 失败，验证该文件内容被打印到容器日志。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+# 覆盖桩：启动前写入 nw-main-error.log，模拟 mixio.js 顶层 require 失败
+cat > "$tmp/MixlyServer" <<'STUB'
+#!/bin/sh
+echo "[INFO] stub MixlyServer running (foreground)"
+mkdir -p "$PWD/mixio-app/runtime"
+cat > "$PWD/mixio-app/runtime/nw-main-error.log" <<'ERR'
+[nw-main] failed to load mixio.js in-process: Error: Cannot find module 'node:sqlite'
+Require stack:
+- /opt/mixly_server/mixio-app/sqlite-native.js
+ERR
+sleep 30
+STUB
+chmod +x "$tmp/MixlyServer"
+cid=$(docker run -d -v "$tmp:/opt/mixly_server" "$IMAGE")
+t8_fail=""
+wait_log "$cid" "MixIO 加载失败" 60 \
+    || t8_fail="未捕获 runtime/nw-main-error.log（MixIO 加载失败时docker logs 无任何线索）"
+if [ -z "$t8_fail" ]; then
+    docker logs "$cid" 2>&1 | grep -q "Cannot find module 'node:sqlite'" \
+        || t8_fail="错误详情未完整打印到容器日志"
+fi
+if [ -z "$t8_fail" ]; then
+    docker logs "$cid" 2>&1 | grep -q "node:sqlite" \
+        || t8_fail="未提示 node:sqlite 兼容性这一常见原因"
+fi
+if [ -n "$t8_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t8_fail" ] || fail "T8 $t8_fail"
+ok "T8 nw-main-error.log 被捕获并打印（含 node:sqlite 兼容性提示）"
+
+echo "=== T9 退出码 0 的诊断指引 ==="
+# 退出码 0 极易被误读为「正常退出」，实际是就绪探测超时后应用自杀。
+# 入口脚本必须明确指出这一点并给出取证命令。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+cid=$(docker run -d -e MIXLY_STUB_EXIT=0 -v "$tmp:/opt/mixly_server" "$IMAGE")
+t9_fail=""
+wait_log "$cid" "退出码: 0" 60 || t9_fail="未捕获退出码 0"
+if [ -z "$t9_fail" ]; then
+    logs=$(docker logs "$cid" 2>&1)
+    echo "$logs" | grep -q "就绪探测" \
+        || t9_fail="未说明退出码 0 实为就绪探测超时"
+    echo "$logs" | grep -q "nw-main-error.log" \
+        || t9_fail="未给出取证命令（nw-main-error.log）"
+fi
+if [ -n "$t9_fail" ]; then
+    echo "----- 容器日志 -----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t9_fail" ] || fail "T9 $t9_fail"
+ok "T9 退出码 0 被正确解读为就绪探测超时并给出取证路径"
+
+echo "🎉 冒烟测试全部通过: $PASS/9"
