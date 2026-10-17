@@ -117,7 +117,47 @@ Mixly 通过串口给开发板烧录程序。容器内服务以非 root 运行�
       - dialout
 ```
 
-（设备文件名按实际为准，`ls /dev/ttyUSB* /dev/ttyACM*` 查看；群晖 DSM 需允许 Container Manager 访问 USB。）
+⚠️ **`devices` / `--device` 是"按需开启"，不是必填项**：Docker 要求宿主机上必须**真实存在**该设备节点，否则直接报错拒绝启动：
+
+```
+Error gathering device information while adding custom device "/dev/ttyUSB0": no such file or directory
+```
+
+- **没插开发板 / 暂时不烧录** → 删掉 `devices` 段（compose）或 `--device` 参数（docker run），不影响其他功能
+- **插了板子还是报错** → 设备名可能不是 `ttyUSB0`，在宿主机执行 `ls /dev/ttyUSB* /dev/ttyACM*` 查看真实名称（部分国产芯片是 `ttyACM0`）
+- **群晖 DSM** → 还需在 Container Manager 套件设置里允许容器访问 USB 设备，否则即使设备存在也透传不进去
+
+（设备文件名按实际为准；`docker run` 命令行等价写法：`--device /dev/ttyUSB0 --group-add dialout`。）
+
+## 常见问题（FAQ）
+
+**Q1：`docker run` 报 `Error gathering device information while adding custom device "/dev/ttyUSB0": no such file or directory`，容器起不来**
+
+宿主机上没有 `/dev/ttyUSB0` 这个设备节点（没插板子或设备名不同）。`--device` / `devices:` 是**按需开启项**，没插开发板就删掉该参数即可；插了板子就在宿主机 `ls /dev/ttyUSB* /dev/ttyACM*` 按真实名称填写。
+
+**Q2：浏览器打开 `https://IP:8443` 提示"连接不是专用连接 / 不安全"**
+
+MixSuite 强制 HTTPS 且使用自签证书，属正常现象：点**高级 → 继续访问**即可。内网使用时也可在 DSM/路由器上做端口映射或反向代理套正式证书。
+
+**Q3：容器起来就退出，日志提示"未检测到 Mixly 官方运行包"**
+
+映射目录里没有放对运行包，或多套了一层目录。要把 `MixSuite-linux-<架构>` 解压后**文件夹里的内容**（`MixlyServer`、`.host/`、`mixio-app/`）直接放进映射目录；入口脚本对多套一层有自动兼容，但仍建议放对。
+
+**Q4：HTTP 8080 打不开**
+
+Mixly 4.0 起官方把 HTTP 端口固定改写为 0，**只能用 HTTPS 8443**，这是官方行为。
+
+**Q5：日志有 NTP/123 端口相关告警**
+
+仅为功能告警（网络时间仿真），不影响 MixIO 主服务与浏览器访问，可忽略。
+
+**Q6：容器日志停留在 Xvfb/nw 相关输出，界面操作无响应**
+
+NW.js 图形壳跑在 Xvfb 虚拟显示上（`:99`），服务本身不依赖它；若确认壳异常，可进容器 `docker exec -it <容器名> bash` 后 `DISPLAY=:99 xwininfo -root` 检查窗口是否创建。
+
+**Q7：龙芯（loong64）机器拉镜像报 exec 格式错误**
+
+确认下载的是 `MixSuite-linux-loong64.zip` 运行包，且镜像 tag 为 v2.0 及以上（多架构 manifest 已含 loong64）；容器启动时入口脚本会校验 `.host/nw` 的 ELF 架构，下错包会给出明确提示。
 
 ## 致谢与声明
 

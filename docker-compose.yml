@@ -44,7 +44,11 @@ services:
     # 绑定 443/123 等特权端口时取消注释（容器内以非 root 运行，默认无需）：
     # cap_add:
     #   - NET_BIND_SERVICE
-    # 烧录硬件（串口）时按需透传 USB 设备，并加入 dialout 组获得串口权限：
+    # 烧录硬件（串口）时按需透传 USB 设备，并加入 dialout 组获得串口权限。
+    # ⚠️ 按需开启：宿主机必须真实存在该设备节点，否则 Docker 直接报错
+    #    "Error gathering device information while adding custom device ...: no such file or directory"
+    #    并拒绝启动。没插开发板就保持注释状态；插了板子先 ls /dev/ttyUSB* /dev/ttyACM*
+    #    确认真实设备名（部分芯片是 ttyACM0），群晖 DSM 还需在 Container Manager 允许 USB 访问。
     # devices:
     #   - /dev/ttyUSB0:/dev/ttyUSB0
     # group_add:
