@@ -222,8 +222,9 @@ cid=$(docker run -d -e MIXLY_STUB_EXIT=42 -v "$tmp:/opt/mixly_server" "$IMAGE")
 t6_fail=""
 wait_log "$cid" "退出码: 42" 60 || t6_fail="未捕获子进程退出码 42（入口脚本可能仍用 exec 启动）"
 if [ -z "$t6_fail" ]; then
-    # 退出后 docker logs 仍可读，日志转发应在崩溃前就已输出
-    docker logs "$cid" 2>&1 | grep -q "\[mixio\] MixIO 服务器已成功启动" \
+    # 用崩溃前最后一条日志做断言：tail -n 0 从文件末尾开始跟，桩启动瞬间写的
+    # 那几行可能落在 tail 就绪之前，只有稍后追加的行一定会被转发出来。
+    docker logs "$cid" 2>&1 | grep -q "\[mixio\].*stub simulating crash" \
         || t6_fail="MixIO 日志未转发到 stdout（缺少 [mixio] 前缀行）"
 fi
 if [ -z "$t6_fail" ]; then

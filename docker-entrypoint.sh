@@ -272,7 +272,6 @@ if [ "$(id -u)" != "0" ]; then
     if ls "$APP_DIR/logs"/*.log >/dev/null 2>&1; then
         ( tail -n 0 -F "$APP_DIR/logs"/*.log 2>/dev/null \
             | sed -u 's/^/[mixio] /' ) &
-        log "已启用 MixIO 日志转发（日志前缀 [mixio]）"
     else
         ( # 日志文件稍后才创建：等它出现再开始跟随
           _waited_log=0
@@ -284,6 +283,7 @@ if [ "$(id -u)" != "0" ]; then
           ls "$APP_DIR/logs"/*.log >/dev/null 2>&1 && \
             tail -n 0 -F "$APP_DIR/logs"/*.log 2>/dev/null | sed -u 's/^/[mixio] /' ) &
     fi
+    log "已启用 MixIO 日志转发（日志行前缀 [mixio]，日志文件出现后即自动跟随）"
 fi
 
 # 就绪播报：40s 起每 30s 检查一次 8443，未监听就明确提示（含排查位置）
@@ -307,8 +307,10 @@ cd "$SERVER_DIR"
 trap 'kill -TERM "$MIXLY_PID" 2>/dev/null || true' TERM INT
 ./"$BIN_NAME" &
 MIXLY_PID=$!
-wait "$MIXLY_PID"
-_rc=$?
+# 脚本顶部有 set -e，而 wait 在子进程非零退出时返回非零 —— 必须用 || 捕获，
+# 否则 set -e 会在此直接终止脚本，下面的退出码解读永远不会执行。
+_rc=0
+wait "$MIXLY_PID" || _rc=$?
 log "MixlyServer 进程已退出，退出码: $_rc"
 case "$_rc" in
     0)   log "退出码 0：应用主动退出（若非预期，请检查是否被 mixio-app/config 里的自动更新触发）" ;;
