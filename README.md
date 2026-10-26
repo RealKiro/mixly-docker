@@ -81,6 +81,60 @@
 - 管理员默认 `admin/public`，**上线后务必在 `mixio-app/config/config.json` 中修改 `ADMIN_PASSWORD`**；离线内网可保留 `ALLOW_REGISTER`。如需外网访问，在 DSM 控制面板做端口映射或用 DSM 反向代理套 443。
 - Mixly 界面内按 **CTRL+SHIFT+M** 可随时调出管理后台。
 
+#### 反向代理：管理后台走 `/admin`
+
+18084 管理后台是独立的 express 应用，所有路由（`/` 登录页、`/admin` 面板、`/adminLogin`、`/js/…`）都按根路径注册；首页“管理后台”链接也会拼成 `https://<当前主机>:18084`。要让它在**同一域名**下走 `/admin`（Cloudflare Tunnel / Nginx 反代），设置一个环境变量即可：
+
+```yaml
+    environment:
+      - TZ=Asia/Shanghai
+      - MIXIO_ADMIN_BASE=/admin
+```
+
+入口脚本每次启动会自动做三处适配（未设置时完全不改动官方文件）：
+
+1. 管理端路由剥掉 `/admin` 前缀：`/admin/` = 登录页、`/admin` = 面板、`/admin/js/…` = 静态资源；
+2. 管理端模板注入 `<base href="/admin/">` 并把根路径改成相对路径，未登录时跳转到 `/admin/`（而不是跳回 MixIO 首页）；
+3. 首页“管理后台”链接：标准端口（443/无端口）指向 `/admin`，其它端口仍指向 `:18084`（本地直连 8443 不受影响）。
+
+启用方式（二选一）：
+
+```bash
+# A. 用新镜像重新创建容器（推荐，镜像需包含本版入口脚本）
+docker compose pull && docker compose up -d
+
+# B. 不重建镜像：临时把入口脚本挂进容器，改完 compose 后 up -d
+#    volumes:
+#      - ./mixly_server:/opt/mixly_server
+#      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
+```
+
+管理端登录后地址是 `/admin/admin`（面板），首页链接是 `/admin`——两者都能用，静态资源与 AJAX 都按前缀解析。
+
+反向代理侧要点（Cloudflare Tunnel 示例）：
+
+```yaml
+# cloudflared config.yml
+ingress:
+  - hostname: mixly.example.com
+    path: ^/admin(/.*)?$          # path 是 Go 正则：匹配 /admin 及其全部子路径
+    service: https://localhost:18084
+    originRequest:
+      noTLSVerify: true           # 18084 是自签证书
+  - hostname: mixly.example.com
+    service: https://localhost:8443
+    originRequest:
+      noTLSVerify: true
+  - service: http_status:404
+```
+
+> `path` 不是通配符而是 Go 正则，写 `/admin*` 只会匹配 `/admin`、`/adminn`，不会匹配 `/admin/js/…`。另外 cloudflared **不会剥离路径**，原样转发给 18084——这正是需要 `MIXIO_ADMIN_BASE` 在应用侧剥前缀的原因。
+
+访问顺序：`https://mixly.example.com/admin` → 未登录跳到 `/admin/`（登录页）→ 登录后进入 `/admin/admin`（面板）。管理端所有 AJAX、静态资源与跳转都已按前缀处理。
+
+> Cloudflare 只代理标准端口，`https://域名:18084` 本身是打不开的；Mixly 编辑器内的 **CTRL+SHIFT+M** 入口在 MixSuite 的 `mixly/` 静态资源里，不在本补丁范围内——如果它也跳到 `:18084`，请反馈。
+
+
 #### MixSuite 产品矩阵（官方 2026-10-15 包）
 
 官方已把多个产品统一进 MixSuite 压缩包，**解压即用**（都是套件根目录下与 `mixio-app/` 同级的旁路目录，MixIO 按请求动态挂载、无需重启）：

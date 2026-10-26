@@ -106,6 +106,7 @@ bash test/smoke-test.sh ghcr.io/realkiro/mixly-server:v2.0
 
 ## 常见问题
 
+- **想用 `https://域名/admin` 访问管理后台**：设置环境变量 `MIXIO_ADMIN_BASE=/admin`，反向代理把 `^/admin(/.*)?$`（cloudflared 的 `path` 是 Go 正则）转发到 18084（自签证书需关闭上游校验，cloudflared 用 `noTLSVerify: true`）。入口脚本会在启动时剥掉前缀、注入 `<base href="/admin/">` 并把管理端模板的根路径改成相对路径，同时改写首页“管理后台”链接；不设置时保持官方原行为。详见 [README.md](README.md) 的「反向代理：管理后台走 `/admin`」。
 - **只有 https 能访问，http 8080 打不开**：MixSuite 设计如此（每次启动强制把 HTTP 端口置 0），请用 `https://<ip>:8443`。
 - **容器起来约几秒后 Mixly 界面才可用**：正常。NW 壳先起本地 HTTPS 服务，窗口就绪后才加载编辑器；`docker logs` 可看到启动过程。
 - **18084 端口冲突导致管理服务起不来**：容器内一般不会遇到；日志出现 `端口 18084 仍被占用` 时检查是否有同机其他 MixIO 实例。

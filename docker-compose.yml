@@ -25,6 +25,11 @@ services:
     shm_size: '1gb'
     environment:
       - TZ=Asia/Shanghai
+      # 可选：把 18084 管理后台挂到同一域名的路径下（反向代理 / Cloudflare Tunnel）。
+      # 设置后入口脚本会剥掉该前缀、把管理端模板改成相对路径，并把首页
+      # “管理后台”链接在标准端口下改为 https://<域名>/admin。
+      # 不设置则保持官方原行为（管理端仍在 https://<IP>:18084）。
+      # - MIXIO_ADMIN_BASE=/admin
       # 可选：端口覆盖（不设置则用官方默认 8443/1883/8083/8084/8082/8086。
       #        HTTP 端口被官方强制为 0，无法开启；改 HTTPS 为 443 需配合
       #       下方 cap_add: NET_BIND_SERVICE）

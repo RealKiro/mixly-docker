@@ -259,6 +259,176 @@ PATCH_EOF
     fi
 }
 
+# ------------------------------------------------ 管理端反代前缀补丁（/admin）
+# 背景：18084 管理后台是独立的 express 应用，全部路由（/ 登录页、/admin 面板、
+# /adminLogin、/js/... 静态资源）都按根路径注册；首页“管理后台”链接也固定
+# 拼成 https://<当前主机>:18084。用反向代理把它挂到同一域名的 /admin 路径时：
+#   * Cloudflare Tunnel 之类的路径规则只转发 /admin*，管理端收到的路径带前缀，
+#     官方路由一个都匹配不上（/admin 会落到面板路由上并跳回首页）；
+#   * 非 443 端口不在 Cloudflare 代理端口范围内，:18084 链接直接打不开。
+# 对策（仅在设置 MIXIO_ADMIN_BASE 时生效，未设置则官方文件保持原样）：
+#   1) mixio.js：在管理端路由之前插入前缀剥离中间件（值从 env 动态读取），
+#      并把未登录时的 res.redirect('/') 改为跳 <base>/（登录页）；
+#   2) ejs/admin.ejs、ejs/manage.ejs：注入 <base href="<base>/">，并把少数以 /
+#      开头的 URL 改成相对路径。这样不管页面停在 /admin 还是 /admin/，
+#      相对路径（js/…、adminLogin、saveAndRestart 等）都落在前缀下面；
+#   3) js/login.js：首页“管理后台”链接在标准端口（443/无端口）下指向 <base>，
+#      非标准端口仍指向 :18084，本地直连 8443 时不退化。
+# 幂等：1/3 用标记和特征匹配，重复执行结果一致；官方在线更新覆盖 mixio.js 后
+# （标记丢失）下次启动自动重打。
+patch_admin_base() {
+    _base="${MIXIO_ADMIN_BASE:-}"
+    _base="${_base%/}"
+    [ -n "$_base" ] || return 0
+
+    case "$_base" in
+        /*) ;;
+        *) warn "MIXIO_ADMIN_BASE 必须以 / 开头（当前: ${MIXIO_ADMIN_BASE}），已忽略"; return 0 ;;
+    esac
+    if ! printf '%s' "$_base" | grep -Eq '^/[A-Za-z0-9._~/-]*$'; then
+        warn "MIXIO_ADMIN_BASE 含非法字符（仅允许字母数字和 . _ ~ / -），已忽略"
+        return 0
+    fi
+
+    _mj="$APP_DIR/mixio.js"
+    if [ ! -f "$_mj" ]; then
+        warn "管理端前缀补丁：未找到 $_mj，跳过（官方运行包不完整？）"
+        return 0
+    fi
+    _rt="$APP_DIR/runtime"
+    mkdir -p "$_rt" 2>/dev/null || true
+
+    # --- 1) mixio.js：前缀剥离中间件 + 未登录重定向 ---
+    if grep -q "MIXLY_DOCKER_ADMIN_BASE_PATCH" "$_mj" 2>/dev/null; then
+        log "管理端前缀补丁：mixio.js 已打过（标记存在），跳过"
+    else
+        _ln_admin=$(grep -n "ejs/admin.ejs" "$_mj" | head -1 | cut -d: -f1)
+        _ln_route=$(( ${_ln_admin:-0} - 1 ))
+        _ln_redirect=$(grep -n "res.redirect('/')" "$_mj" | head -1 | cut -d: -f1)
+        _ok=1
+        [ -n "$_ln_admin" ] && [ "$_ln_route" -gt 0 ] || _ok=0
+        [ "$_ok" = "1" ] && [ -n "$_ln_redirect" ] && [ "$_ln_redirect" -gt "$_ln_route" ] || _ok=0
+        [ "$_ok" = "1" ] && sed -n "${_ln_route}p" "$_mj" | grep -qF "app.get('/', function" || _ok=0
+        [ "$_ok" = "1" ] && sed -n "${_ln_route},${_ln_redirect}p" "$_mj" | grep -qF "app.get('/admin'" || _ok=0
+
+        if [ "$_ok" != "1" ]; then
+            warn "管理端前缀补丁：未能在 mixio.js 中定位管理端路由锚点（版本差异？），已跳过"
+        else
+            cat > "$_rt/admin-base-route.patch.js" <<'PATCH_EOF'
+    // [MIXLY_DOCKER_ADMIN_BASE_PATCH] 反向代理前缀支持（MIXIO_ADMIN_BASE=/admin）
+    // 官方管理端路由全部按根路径注册；反代把 18084 挂到 /admin 时，这里在
+    // 路由之前剥掉前缀：/admin/→/、/admin/admin→/admin、/admin/js/…→/js/…。
+    // 未设置 MIXIO_ADMIN_BASE 时整段不生效（等同于官方原行为）。
+    var __mixlyAdminBase = (process.env.MIXIO_ADMIN_BASE || '').replace(/\/+$/, '');
+    if (__mixlyAdminBase) {
+        app.use(function (req, res, next) {
+            var __u = req.url || '/';
+            if (__u === __mixlyAdminBase) {
+                req.url = '/admin';
+            } else if (__u.indexOf(__mixlyAdminBase + '/') === 0) {
+                req.url = __u.slice(__mixlyAdminBase.length);
+            } else if (__u.indexOf(__mixlyAdminBase + '?') === 0) {
+                req.url = '/admin' + __u.slice(__mixlyAdminBase.length);
+            }
+            next();
+        });
+    }
+PATCH_EOF
+            printf "            res.redirect(__mixlyAdminBase + '/')\n" > "$_rt/admin-base-redirect.patch.js"
+
+            awk -v route="$_ln_route" -v redirect="$_ln_redirect" \
+                -v mw="$_rt/admin-base-route.patch.js" -v rw="$_rt/admin-base-redirect.patch.js" '
+                NR == route {
+                    while ((getline _l < mw) > 0) print _l
+                    close(mw)
+                }
+                NR == redirect {
+                    while ((getline _l < rw) > 0) print _l
+                    close(rw)
+                    next
+                }
+                { print }
+            ' "$_mj" > "$_rt/mixio.js.patched" 2>/dev/null
+
+            if [ -s "$_rt/mixio.js.patched" ]; then
+                cat "$_rt/mixio.js.patched" > "$_mj" 2>/dev/null \
+                    && log "管理端前缀补丁：mixio.js 已支持 ${_base}（剥离前缀；未登录跳 ${_base}/）" \
+                    || warn "管理端前缀补丁：写入 mixio.js 失败（卷不可写？）"
+            else
+                warn "管理端前缀补丁：生成 patched 文件失败，已跳过"
+            fi
+            rm -f "$_rt/mixio.js.patched" 2>/dev/null || true
+        fi
+    fi
+
+    # --- 2) 管理端模板：注入 <base>，并把根路径改成相对路径 ---
+    # <base href="/admin/"> 让模板里的相对路径（js/…、adminLogin、saveAndRestart 等）
+    # 一律以 /admin/ 为基准解析，页面停在 /admin（无尾斜杠）时也不会落到站点根。
+    _tpl="$APP_DIR/ejs"
+    _base_tag="    <base href=\"${_base}/\">"
+    for _f in "$_tpl/admin.ejs" "$_tpl/manage.ejs"; do
+        [ -f "$_f" ] || continue
+        if grep -q "MIXLY_DOCKER_ADMIN_BASE_PATCH" "$_f" 2>/dev/null; then
+            # 已注入过：只更新 base 的取值（换前缀时无需还原原件）
+            awk -v tag="$_base_tag" '
+                /<base href=/ { print tag; next }
+                { print }
+            ' "$_f" > "$_rt/ejs.patched" 2>/dev/null &&
+            cat "$_rt/ejs.patched" > "$_f" 2>/dev/null ||
+                warn "管理端前缀补丁：更新 $(basename "$_f") 的 <base> 失败"
+        else
+            awk -v tag="$_base_tag" '
+                !done && /<meta charset="utf-8">/ {
+                    print
+                    print "    <!-- [MIXLY_DOCKER_ADMIN_BASE_PATCH] 反向代理前缀（MIXIO_ADMIN_BASE）：相对路径以该前缀为基准 -->"
+                    print tag
+                    done = 1
+                    next
+                }
+                { print }
+            ' "$_f" > "$_rt/ejs.patched" 2>/dev/null &&
+            cat "$_rt/ejs.patched" > "$_f" 2>/dev/null ||
+                warn "管理端前缀补丁：注入 $(basename "$_f") 的 <base> 失败"
+        fi
+    done
+
+    if [ -f "$_tpl/admin.ejs" ]; then
+        sed -e "s|\$.post('/adminLogin'|\$.post('adminLogin'|g" \
+            "$_tpl/admin.ejs" > "$_rt/admin.ejs.patched" 2>/dev/null &&
+        cat "$_rt/admin.ejs.patched" > "$_tpl/admin.ejs" 2>/dev/null ||
+            warn "管理端前缀补丁：改写 ejs/admin.ejs 失败"
+    fi
+    if [ -f "$_tpl/manage.ejs" ]; then
+        sed -e 's|href="/admin?page=|href="admin?page=|g' \
+            -e "s|url: '/saveAndRestart'|url: 'saveAndRestart'|" \
+            -e "s|\$.get('/stop'|\$.get('stop'|" \
+            -e "s|\$.get('/start'|\$.get('start'|" \
+            -e "s|fetch('/api/check-update'|fetch('api/check-update'|" \
+            -e 's|href="index"|href="admin"|' \
+            "$_tpl/manage.ejs" > "$_rt/manage.ejs.patched" 2>/dev/null &&
+        cat "$_rt/manage.ejs.patched" > "$_tpl/manage.ejs" 2>/dev/null ||
+            warn "管理端前缀补丁：改写 ejs/manage.ejs 失败"
+    fi
+
+    # --- 3) 首页“管理后台”链接：标准端口指向 <base>，非标准端口保留 :18084 ---
+    _lj="$APP_DIR/js/login.js"
+    if [ -f "$_lj" ] && grep -q ":18084" "$_lj" 2>/dev/null; then
+        awk -v base="$_base" '
+            index($0, ":18084") && index($0, "href:") {
+                print "        href: (window.MIXIO_ADMIN_URL || ((window.location.port === \"\" || window.location.port === \"443\") ? \"" base "\" : \"https://\" + window.location.hostname + \":18084\")),"
+                next
+            }
+            { print }
+        ' "$_lj" > "$_rt/login.js.patched" 2>/dev/null &&
+        cat "$_rt/login.js.patched" > "$_lj" 2>/dev/null &&
+        log "管理端前缀补丁：首页“管理后台”链接已适配（443 → ${_base}，其它端口保留 :18084）" ||
+            warn "管理端前缀补丁：改写 js/login.js 失败"
+    fi
+
+    rm -f "$_rt/admin-base-route.patch.js" "$_rt/admin-base-redirect.patch.js" \
+          "$_rt/admin.ejs.patched" "$_rt/manage.ejs.patched" "$_rt/login.js.patched" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------- root 准备
 # X11 socket 目录（root 与 --user 两种方式都需要；非 root 时 /tmp 可写也能建）
 mkdir -p /tmp/.X11-unix 2>/dev/null || true
@@ -378,6 +548,9 @@ if [ "$(id -u)" = "0" ]; then
     # MixMO 托管补丁：root 上下文执行（保证对卷内 mixio.js 可写）。
     # 幂等：已打过（带 MIXLY_DOCKER_MIXMO_PATCH 标记）则直接返回。
     patch_mixmo_support
+
+    # 管理端反代前缀补丁（MIXIO_ADMIN_BASE，如 /admin）：同样需要写卷内文件
+    patch_admin_base
 
     # zip 解压后常丢失执行位；firstrun.sh 亦要求对这三个文件 chmod +x
     chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" \
@@ -592,6 +765,9 @@ log "访问入口: https://<本机IP>:8443（HTTPS，自签证书）/ 管理: ht
 # MixMO 托管补丁的幂等兜底：root 段已打过；这里覆盖 --user 非 root 启动
 # （root 段没执行到）的场景。已打则直接返回，不产生额外输出。
 patch_mixmo_support
+
+# 管理端反代前缀补丁的同样兜底（非 root 时若卷不可写会告警，不影响启动）
+patch_admin_base
 
 # ------------------------------------------- NW.js 调用参数（与官方启动器一致）
 # 从官方 MixlyServer 二进制里提取到的真实调用形式（见其字符串表）：
