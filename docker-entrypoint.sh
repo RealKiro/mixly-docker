@@ -447,6 +447,49 @@ PATCH_EOF
           "$_rt/login2.js.patched" 2>/dev/null || true
 }
 
+# ------------------------------------------------------- 管理端入口链接（子域名）
+# 与 patch_admin_base 互补的另一种挂法：给管理端单独一个子域名
+# （如 https://admin.example.com/ → 宿主机 18084）。
+#   * 适用：Cloudflare 面板管理的隧道（Zero Trust → 公共主机名）不支持按路径分流，
+#     且 18084 不在 Cloudflare 可代理端口列表内，路径方案无法落地；
+#   * 此时不需要前缀剥离（MIXIO_ADMIN_BASE 留空），管理端在自己的根路径下工作，
+#     只需把首页“管理后台”链接改到该子域名；
+#   * 与 MIXIO_ADMIN_BASE 同时设置时，本函数后执行、以 MIXIO_ADMIN_URL 为准。
+patch_admin_link() {
+    _url="${MIXIO_ADMIN_URL:-}"
+    [ -n "$_url" ] || return 0
+    case "$_url" in
+        http://*|https://*|/*) ;;
+        *) warn "MIXIO_ADMIN_URL 需以 http://、https:// 或 / 开头（当前: ${_url}），已忽略"; return 0 ;;
+    esac
+
+    _rt="$APP_DIR/runtime"
+    mkdir -p "$_rt" 2>/dev/null || true
+
+    for _lf in "$APP_DIR/js/login.js" "$SERVER_DIR/mixly/mixvm/mixio/js/login.js"; do
+        [ -f "$_lf" ] || continue
+        if grep -qF "$_url" "$_lf" 2>/dev/null; then
+            log "管理端入口链接：${_lf#$SERVER_DIR/} 已指向 ${_url}，跳过"
+            continue
+        fi
+        awk -v url="$_url" '
+            index($0, ":18084") && index($0, "href:") {
+                print "        href: (window.MIXIO_ADMIN_URL || \"" url "\"),"
+                next
+            }
+            index($0, ":18084") && index($0, "attr(\"href\"") {
+                print "        $(\"#admin\").attr(\"href\", window.MIXIO_ADMIN_URL || \"" url "\")"
+                next
+            }
+            { print }
+        ' "$_lf" > "$_rt/login-url.patched" 2>/dev/null &&
+        cat "$_rt/login-url.patched" > "$_lf" 2>/dev/null &&
+        log "管理端入口链接：${_lf#$SERVER_DIR/} → ${_url}" ||
+            warn "管理端入口链接：改写 ${_lf#$SERVER_DIR/} 失败（卷不可写？）"
+        rm -f "$_rt/login-url.patched" 2>/dev/null || true
+    done
+}
+
 # ---------------------------------------------------------------- root 准备
 # X11 socket 目录（root 与 --user 两种方式都需要；非 root 时 /tmp 可写也能建）
 mkdir -p /tmp/.X11-unix 2>/dev/null || true
@@ -569,6 +612,8 @@ if [ "$(id -u)" = "0" ]; then
 
     # 管理端反代前缀补丁（MIXIO_ADMIN_BASE，如 /admin）：同样需要写卷内文件
     patch_admin_base
+    # 子域名方案：把首页“管理后台”链接指到 MIXIO_ADMIN_URL（无前缀剥离）
+    patch_admin_link
 
     # zip 解压后常丢失执行位；firstrun.sh 亦要求对这三个文件 chmod +x
     chmod +x "$SERVER_DIR/$BIN_NAME" "$NW_BIN" \
@@ -786,6 +831,7 @@ patch_mixmo_support
 
 # 管理端反代前缀补丁的同样兜底（非 root 时若卷不可写会告警，不影响启动）
 patch_admin_base
+patch_admin_link
 
 # ------------------------------------------- NW.js 调用参数（与官方启动器一致）
 # 从官方 MixlyServer 二进制里提取到的真实调用形式（见其字符串表）：

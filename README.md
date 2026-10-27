@@ -178,6 +178,32 @@ server {
 
 访问顺序：`https://mixly.example.com/admin` → 未登录跳到 `/admin/`（登录页）→ 登录后进入 `/admin/admin`（面板）。管理端所有 AJAX、静态资源与跳转都已按前缀处理。
 
+#### 方案二：管理端独立子域名（Cloudflare 面板隧道 / DSM 反向代理）
+
+**什么时候必须用这个**：路径模式要求入口能按路径分流、且能回源到 18084。但
+
+- Cloudflare 代理只支持固定端口（443、2053、2083、2087、2096、8443），**18084 不在列表**，所以**不能**用 Origin Rules 把 `/admin` 的源站端口改成 18084；
+- Zero Trust 面板管理的隧道只有「公共主机名 → 服务」，**不支持按路径分流**；
+- DSM 的「登录门户 → 高级 → 反向代理」也只能按域名分。
+
+三者叠加的结果就是：`/admin` 被整体送到主站，返回 `Cannot GET /admin`（Express 兜底 404，主站没有该路由）。
+
+做法：给管理端单独一个子域名，它的根路径就是登录页。
+
+1. Zero Trust → Networks → Tunnels → 你的隧道 → **Public Hostname → Add**：
+   - Subdomain 填 `admin`，Domain 选你的主域（示例：`admin.mixly.example.com`）
+   - Service：`HTTPS` → `10.10.64.4:18084`（cloudflared 与 NAS 同机时写 `localhost:18084`）
+   - Additional application settings → TLS → 勾上 **No TLS Verify**（18084 是自签证书）
+2. compose 里补一行（**不必删掉** `MIXIO_ADMIN_BASE`）：
+   ```yaml
+   - MIXIO_ADMIN_URL=https://admin.mixly.example.com/
+   ```
+3. `docker compose up -d` 重建容器。
+
+之后 `https://admin.mixly.example.com/` 是登录页，`/admin` 是面板；首页“管理后台”按钮直接指向它。两个变量共存是安全的——请求带 `/admin` 前缀就剥离、不带就原样通过，路径与子域名两种入口可同时使用。
+
+> 裸机部署等价命令：`./patch-admin-base.sh /path/to/MixSuite-linux-x64 '' https://admin.mixly.example.com/`（第二个参数留空即子域名模式，不做任何前缀改写）。
+
 > Cloudflare 只代理标准端口，`https://域名:18084` 本身是打不开的；Mixly 编辑器内的 **CTRL+SHIFT+M** 入口在 MixSuite 的 `mixly/` 静态资源里，不在本补丁范围内——如果它也跳到 `:18084`，请反馈。
 
 
