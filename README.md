@@ -178,17 +178,22 @@ server {
 
 访问顺序：`https://mixly.example.com/admin` → 未登录跳到 `/admin/`（登录页）→ 登录后进入 `/admin/admin`（面板）。管理端所有 AJAX、静态资源与跳转都已按前缀处理。
 
-#### 方案二：管理端独立子域名（Cloudflare 面板隧道 / DSM 反向代理）
+#### Cloudflare Zero Trust 隧道：路径规则必须排在主机名规则之前
 
-**什么时候必须用这个**：路径模式要求入口能按路径分流、且能回源到 18084。但
+新版面板的 **Tunnels → 路由** 支持路径规则（如 `mixly.example.com/admin → https://<内网IP>:18084`）。隧道回源是 cloudflared 从内网发起的连接，**不受 Cloudflare 公网端口白名单约束**（那个白名单只限制「客户端 → Cloudflare 边缘」的端口），所以直连 18084 完全可行。
 
-- Cloudflare 代理只支持固定端口（443、2053、2083、2087、2096、8443），**18084 不在列表**，所以**不能**用 Origin Rules 把 `/admin` 的源站端口改成 18084；
-- Zero Trust 面板管理的隧道只有「公共主机名 → 服务」，**不支持按路径分流**；
-- DSM 的「登录门户 → 高级 → 反向代理」也只能按域名分。
+真正的坑是**匹配顺序**：面板上写明「已发布的路由从上到下匹配，第一个匹配的处理请求」。只写主机名那条（`mixly.example.com`）会匹配**所有路径**，所以 `/admin` 规则必须排在它**上面**：
 
-三者叠加的结果就是：`/admin` 被整体送到主站，返回 `Cannot GET /admin`（Express 兜底 404，主站没有该路由）。
+| 顺序 | 目标 | 服务 | 其他设置 |
+|---|---|---|---|
+| 1 | `mixly.example.com/admin` | `https://10.10.64.4:18084` | TLS → No TLS Verify |
+| 2 | `mixly.example.com` | `https://10.10.64.4:18443` | 默认 |
 
-做法：给管理端单独一个子域名，它的根路径就是登录页。
+> 判别法：`/admin`、`/admin/`、`/adminLogin` **三者全 404** → 说明还在走主机名路由（顺序错了，把 `/admin` 那条往上拖）；只有 `/admin` 是 404 而 `/admin/` 正常 → 路径规则被写成了精确匹配。
+
+#### 方案二：管理端独立子域名（旧版面板 / DSM 反向代理）
+
+若面板版本没有路径规则，或入口是 DSM「登录门户 → 高级 → 反向代理」（只能按域名分，不能按路径分），就给管理端单独一个子域名，它的根路径就是登录页。
 
 1. Zero Trust → Networks → Tunnels → 你的隧道 → **Public Hostname → Add**：
    - Subdomain 填 `admin`，Domain 选你的主域（示例：`admin.mixly.example.com`）
