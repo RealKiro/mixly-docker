@@ -172,6 +172,10 @@ server {
 > **关键**：`location /admin` 用前缀匹配覆盖 `/admin`、`/admin/`、`/admin/js/…`、`/admin/admin` 全部子路径；`proxy_pass` 写成 `https://127.0.0.1:18084`（**不带尾斜杠、不带 URI**），把路径**原样**转发给 18084——前缀由 `MIXIO_ADMIN_BASE` 补丁在应用侧剥离。若写成 `proxy_pass https://127.0.0.1:18084/;`（带尾斜杠）或 `.../admin;`，Nginx 会先剥掉 `/admin` 前缀，反而与补丁冲突。
 > 另外 cloudflared 的 `path` 不是通配符而是 Go 正则，写 `/admin*` 只会匹配 `/admin`、`/adminn`，不会匹配 `/admin/js/…`。两类反代都**不剥离路径**、原样转发给 18084——这正是需要 `MIXIO_ADMIN_BASE` 在应用侧剥前缀的原因。
 
+> **改了宿主机端口映射时**：上面 `127.0.0.1:8443` / `127.0.0.1:18084` 指的都是**宿主机端口**，不是容器内端口。若 compose 里写成 `"18443:8443"`、`"18484:18084"`，则 `location /` 要指向 `https://127.0.0.1:18443`，`location /admin` 要指向 `https://127.0.0.1:18484`——两个端口**不能混用**。用 `docker port <容器名>` 可查实际映射（务必确认 18084 那一行存在，没发布就无从转发）。
+>
+> 反过来，这也是**最快的故障判别法**：访问 `/admin` 若返回 `Cannot GET /admin`（Express 兜底 404 文案），说明请求进了**主站**而不是管理端——主站没有任何 `/admin` 路由；18084 上该路由是存在的，未登录会 `302` 到 `/admin/`。此时查 `/admin` 的 `proxy_pass` 是否误指到主站端口。
+
 访问顺序：`https://mixly.example.com/admin` → 未登录跳到 `/admin/`（登录页）→ 登录后进入 `/admin/admin`（面板）。管理端所有 AJAX、静态资源与跳转都已按前缀处理。
 
 > Cloudflare 只代理标准端口，`https://域名:18084` 本身是打不开的；Mixly 编辑器内的 **CTRL+SHIFT+M** 入口在 MixSuite 的 `mixly/` 静态资源里，不在本补丁范围内——如果它也跳到 `:18084`，请反馈。
