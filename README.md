@@ -97,7 +97,7 @@
 2. 管理端模板注入 `<base href="/admin/">` 并把根路径改成相对路径，未登录时跳转到 `/admin/`（而不是跳回 MixIO 首页）；
 3. 首页“管理后台”链接：标准端口（443/无端口）指向 `/admin`，其它端口仍指向 `:18084`（本地直连 8443 不受影响）。
 
-启用方式（二选一）：
+启用方式（三选一）：
 
 ```bash
 # A. 用新镜像重新创建容器（推荐，镜像需包含本版入口脚本）
@@ -107,7 +107,13 @@ docker compose pull && docker compose up -d
 #    volumes:
 #      - ./mixly_server:/opt/mixly_server
 #      - ./docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
+
+# C. 不用 Docker（裸机 / 群晖直接跑官方包）：对套件根目录执行独立补丁脚本
+#    （与入口脚本同一套逻辑，幂等；官方在线更新后重跑一次即可重新生效）
+/path/to/patch-admin-base.sh /path/to/MixSuite-linux-x64 /admin
 ```
+
+> 三种方式都只改程序文件、不动数据；首次执行前自动备份 `*.mixly-docker-orig`。
 
 管理端登录后地址是 `/admin/admin`（面板），首页链接是 `/admin`——两者都能用，静态资源与 AJAX 都按前缀解析。
 
@@ -128,7 +134,43 @@ ingress:
   - service: http_status:404
 ```
 
-> `path` 不是通配符而是 Go 正则，写 `/admin*` 只会匹配 `/admin`、`/adminn`，不会匹配 `/admin/js/…`。另外 cloudflared **不会剥离路径**，原样转发给 18084——这正是需要 `MIXIO_ADMIN_BASE` 在应用侧剥前缀的原因。
+Nginx 示例（域名 443 → 容器；主站 `/` 走 8443、`/admin` 走 18084）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mixly.example.com;
+    # ...ssl_certificate / ssl_certificate_key / http2 等按你的证书配置...
+
+    # 管理后台：https://域名/admin → 容器 18084
+    location /admin {
+        proxy_pass https://127.0.0.1:18084;   # 容器/宿主机地址按实际改
+        proxy_ssl_verify off;                  # 18084 是自签证书
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # MixIO 主站
+    location / {
+        proxy_pass https://127.0.0.1:8443;
+        proxy_ssl_verify off;                  # 8443 同为自签证书
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";  # WebSocket(MQTT 1883 的 8083/8084 协同)
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
+    }
+}
+```
+
+> **关键**：`location /admin` 用前缀匹配覆盖 `/admin`、`/admin/`、`/admin/js/…`、`/admin/admin` 全部子路径；`proxy_pass` 写成 `https://127.0.0.1:18084`（**不带尾斜杠、不带 URI**），把路径**原样**转发给 18084——前缀由 `MIXIO_ADMIN_BASE` 补丁在应用侧剥离。若写成 `proxy_pass https://127.0.0.1:18084/;`（带尾斜杠）或 `.../admin;`，Nginx 会先剥掉 `/admin` 前缀，反而与补丁冲突。
+> 另外 cloudflared 的 `path` 不是通配符而是 Go 正则，写 `/admin*` 只会匹配 `/admin`、`/adminn`，不会匹配 `/admin/js/…`。两类反代都**不剥离路径**、原样转发给 18084——这正是需要 `MIXIO_ADMIN_BASE` 在应用侧剥前缀的原因。
 
 访问顺序：`https://mixly.example.com/admin` → 未登录跳到 `/admin/`（登录页）→ 登录后进入 `/admin/admin`（面板）。管理端所有 AJAX、静态资源与跳转都已按前缀处理。
 

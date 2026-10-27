@@ -404,6 +404,8 @@ PATCH_EOF
             -e "s|\$.get('/stop'|\$.get('stop'|" \
             -e "s|\$.get('/start'|\$.get('start'|" \
             -e "s|fetch('/api/check-update'|fetch('api/check-update'|" \
+            -e "s|fetch('/api/exit-after-update'|fetch('api/exit-after-update'|" \
+            -e "s|fetch('/stop'|fetch('stop'|" \
             -e 's|href="index"|href="admin"|' \
             "$_tpl/manage.ejs" > "$_rt/manage.ejs.patched" 2>/dev/null &&
         cat "$_rt/manage.ejs.patched" > "$_tpl/manage.ejs" 2>/dev/null ||
@@ -425,8 +427,24 @@ PATCH_EOF
             warn "管理端前缀补丁：改写 js/login.js 失败"
     fi
 
+    # Mixly 编辑器内嵌页的同一逻辑副本（pure-web 版），一并适配
+    _lj2="$SERVER_DIR/mixly/mixvm/mixio/js/login.js"
+    if [ -f "$_lj2" ] && grep -q ":18084" "$_lj2" 2>/dev/null; then
+        awk -v base="$_base" '
+            index($0, ":18084") && index($0, "attr(\"href\"") {
+                print "        $(\"#admin\").attr(\"href\", window.MIXIO_ADMIN_URL || ((window.location.port === \"\" || window.location.port === \"443\") ? \"" base "\" : \"https://\" + window.location.hostname + \":18084\"))"
+                next
+            }
+            { print }
+        ' "$_lj2" > "$_rt/login2.js.patched" 2>/dev/null &&
+        cat "$_rt/login2.js.patched" > "$_lj2" 2>/dev/null &&
+        log "管理端前缀补丁：pure-web 副本（mixly/mixvm/mixio/js/login.js）已同步适配" ||
+            warn "管理端前缀补丁：改写 pure-web login.js 失败"
+    fi
+
     rm -f "$_rt/admin-base-route.patch.js" "$_rt/admin-base-redirect.patch.js" \
-          "$_rt/admin.ejs.patched" "$_rt/manage.ejs.patched" "$_rt/login.js.patched" 2>/dev/null || true
+          "$_rt/admin.ejs.patched" "$_rt/manage.ejs.patched" "$_rt/login.js.patched" \
+          "$_rt/login2.js.patched" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------- root 准备
