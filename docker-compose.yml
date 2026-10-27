@@ -25,12 +25,16 @@ services:
     shm_size: '1gb'
     environment:
       - TZ=Asia/Shanghai
-      # 把 18084 管理后台挂到同一域名的 /admin 路径下（反向代理 / Cloudflare Tunnel）。
-      # 设置后入口脚本会剥掉该前缀、把管理端模板改成相对路径，并把首页
-      # “管理后台”链接在标准端口下改为 https://<域名>/admin。
-      # 不设置则保持官方原行为（管理端仍在 https://<IP>:18084）。
-      # 生效前提：反向代理把 /admin(/.*)? 转发到 18084（见 README「反向代理」节）。
+      # ── 管理后台入口（两种挂法，按反代能力选一种）──────────────────────────
+      # 方案一「路径模式」：反代把 /admin(/.*)? 原样转发到 18084。
+      #   只有支持按路径分流的入口才行 —— Nginx / cloudflared 的 config.yml。
+      #   Cloudflare 面板（Zero Trust → 公共主机名）不支持路径，DSM 反向代理也不支持。
       - MIXIO_ADMIN_BASE=/admin
+      # 方案二「子域名模式」：管理端单独一个子域名直接指到 18084。
+      #   Cloudflare 面板隧道 / DSM 反代都能配；填了它，首页“管理后台”按钮就指向这里。
+      #   与 MIXIO_ADMIN_BASE 共存也安全：请求带前缀则剥离、不带则原样通过。
+      # ⚠️ 把域名换成你自己的；不打算用子域名就整行注释掉。
+      - MIXIO_ADMIN_URL=https://admin.mixly.aino.fun/
       # 可选：端口覆盖（不设置则用官方默认 8443/1883/8083/8084/8082/8086。
       #        HTTP 端口被官方强制为 0，无法开启；改 HTTPS 为 443 需配合
       #       下方 cap_add: NET_BIND_SERVICE）

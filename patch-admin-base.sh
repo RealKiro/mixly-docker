@@ -39,23 +39,32 @@
 set -e
 
 SUITE_DIR="${1:-}"
-BASE="${2:-/admin}"
+BASE="${2-/admin}"
+LINK_URL="${3:-${MIXIO_ADMIN_URL:-}}"
 
 log()  { echo "[patch-admin-base] $*"; }
 warn()  { echo "[patch-admin-base][WARN] $*" >&2; }
 
 if [ -z "$SUITE_DIR" ]; then
-    echo "用法: $0 <MixSuite套件根目录> [admin前缀，默认 /admin]" >&2
+    echo "用法: $0 <MixSuite套件根目录> [admin前缀，默认 /admin] [管理端完整地址，可选]" >&2
+    echo "  路径模式: $0 /opt/mixly_server /admin" >&2
+    echo "  子域名模式: $0 /opt/mixly_server '' https://admin.example.com/" >&2
     exit 1
 fi
 BASE="${BASE%/}"
-case "$BASE" in
-    /*) ;;
-    *) warn "前缀必须以 / 开头（当前: $BASE），已忽略"; exit 1 ;;
-esac
-if ! printf '%s' "$BASE" | grep -Eq '^/[A-Za-z0-9._~/-]*$'; then
-    warn "前缀含非法字符（仅允许字母数字和 . _ ~ / -），已忽略"
+if [ -z "$BASE" ] && [ -z "$LINK_URL" ]; then
+    warn "第二个参数为空且未提供管理端地址（第三个参数 / MIXIO_ADMIN_URL）；如需路径模式请传 /admin"
     exit 1
+fi
+if [ -n "$BASE" ]; then
+    case "$BASE" in
+        /*) ;;
+        *) warn "前缀必须以 / 开头（当前: $BASE），已忽略"; exit 1 ;;
+    esac
+    if ! printf '%s' "$BASE" | grep -Eq '^/[A-Za-z0-9._~/-]*$'; then
+        warn "前缀含非法字符（仅允许字母数字和 . _ ~ / -），已忽略"
+        exit 1
+    fi
 fi
 
 APP_DIR="$SUITE_DIR/mixio-app"
@@ -72,6 +81,49 @@ backup_once() {
             || warn "备份 $_f 失败（不影响补丁本身）"
     fi
 }
+
+# ------------------------------------- 管理端入口链接（子域名模式 / 显式指定地址）
+# 首页“管理后台”按钮的地址有两种来源：路径模式下按端口判断走 <BASE>，
+# 子域名模式下必须显式给完整地址（LINK_URL）。两者同时存在时以 LINK_URL 为准。
+rewrite_admin_link() {
+    [ -n "$LINK_URL" ] || return 0
+    case "$LINK_URL" in
+        http://*|https://*|/*) ;;
+        *) warn "管理端地址需以 http://、https:// 或 / 开头（当前: $LINK_URL），已忽略"; return 0 ;;
+    esac
+    for _lf in "$APP_DIR/js/login.js" "$SUITE_DIR/mixly/mixvm/mixio/js/login.js"; do
+        [ -f "$_lf" ] || continue
+        backup_once "$_lf"
+        if grep -qF "$LINK_URL" "$_lf" 2>/dev/null; then
+            log "$(basename "$_lf") 已指向 $LINK_URL，跳过"
+            continue
+        fi
+        awk -v url="$LINK_URL" '
+            index($0, ":18084") && index($0, "href:") {
+                print "        href: (window.MIXIO_ADMIN_URL || \"" url "\"),"
+                next
+            }
+            index($0, ":18084") && index($0, "attr(\"href\"") {
+                print "        $(\"#admin\").attr(\"href\", window.MIXIO_ADMIN_URL || \"" url "\")"
+                next
+            }
+            { print }
+        ' "$_lf" > "$RT/login-url.patched" 2>/dev/null &&
+        cat "$RT/login-url.patched" > "$_lf" 2>/dev/null &&
+        log "$(basename "$_lf")：首页“管理后台” → $LINK_URL" ||
+            warn "改写 $(basename "$_lf") 失败"
+        rm -f "$RT/login-url.patched" 2>/dev/null || true
+    done
+}
+
+# 子域名模式（BASE 为空）：管理端在自己的根路径下工作，不需要剥离前缀、
+# 不需要 <base>，只改首页入口。适用于 Cloudflare 面板隧道 / DSM 反向代理
+# 这类无法按路径分流的入口。
+if [ -z "$BASE" ]; then
+    rewrite_admin_link
+    log "完成：子域名模式（管理端 $LINK_URL，无前缀改写）。请重启 MixIO 服务。"
+    exit 0
+fi
 
 # ---------------------------------------------------------------- 1) mixio.js
 # 前缀剥离中间件 + 未登录重定向到 <BASE>/
@@ -234,6 +286,9 @@ if [ -f "$LJ2" ] && grep -q ":18084" "$LJ2" 2>/dev/null; then
 fi
 
 rm -f "$RT/admin-base-route.patch.js" "$RT/admin-base-redirect.patch.js" 2>/dev/null || true
+
+# 若显式给了管理端地址，覆盖上面按端口推导出的入口（放在最后，优先级最高）
+rewrite_admin_link
 
 # 汇总验证
 _n=0
