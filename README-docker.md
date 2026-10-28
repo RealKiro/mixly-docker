@@ -106,12 +106,69 @@ bash test/smoke-test.sh ghcr.io/realkiro/mixly-server:v2.0
 
 ## 常见问题
 
-- **想用 `https://域名/admin` 访问管理后台**：设置环境变量 `MIXIO_ADMIN_BASE=/admin`，反向代理把 `^/admin(/.*)?$`（cloudflared 的 `path` 是 Go 正则）转发到 18084（自签证书需关闭上游校验，cloudflared 用 `noTLSVerify: true`）。入口脚本会在启动时剥掉前缀、注入 `<base href="/admin/">` 并把管理端模板的根路径改成相对路径，同时改写首页“管理后台”链接；不设置时保持官方原行为。详见 [README.md](README.md) 的「反向代理：管理后台走 `/admin`」。
+- **想用 `https://域名/admin` 访问管理后台**：设置环境变量 `MIXIO_ADMIN_BASE=/admin`，反向代理把 `^/admin(/.*)?$`（cloudflared 的 `path` 是 Go 正则）转发到 18084（自签证书需关闭上游校验，cloudflared 用 `noTLSVerify: true`）。入口脚本会在启动时剥掉前缀、注入 `<base href="/admin/">` 并把管理端模板的根路径改成相对路径，同时改写首页“管理后台”链接；不设置时保持官方原行为。详见 [README.md](README.md#管理后台走-admin)。
 - **只有 https 能访问，http 8080 打不开**：MixSuite 设计如此（每次启动强制把 HTTP 端口置 0），请用 `https://<ip>:8443`。
 - **容器起来约几秒后 Mixly 界面才可用**：正常。NW 壳先起本地 HTTPS 服务，窗口就绪后才加载编辑器；`docker logs` 可看到启动过程。
 - **18084 端口冲突导致管理服务起不来**：容器内一般不会遇到；日志出现 `端口 18084 仍被占用` 时检查是否有同机其他 MixIO 实例。
 - **NTP 仿真不可用**：非 root 无法绑定 UDP 123，仅告警不致命；需要时在 compose 加 `cap_add: [NET_BIND_SERVICE]` 并映射 `123:123/udp`。
 - **烧录时找不到串口**：透传 USB 设备并加 `group_add: [dialout]`，见 [README.md](README.md) 的「烧录硬件」一节。
 - **想看看容器里那个 GUI 窗口**：它在 Xvfb 虚拟显示里，浏览器访问无需它；确有需要可 `docker exec -it <容器> bash` 后自行安装 `x11vnc`/`xterm` 等工具。
-- **容器反复重启、只活几秒、日志有 `XGetWindowAttributes failed for window 0`**：这是 NW.js 窗口层故障（窗口从未创建成功）。v2.1.0 已定位根因——官方启动器传给 `.host/nw` 的 `--ozone-platform=x11` 在 Xvfb 下建不了窗口；**v2.2.0 起默认启动方式已避开该参数（直连 `.host/nw`，不指定 ozone）**，升级后即恢复正常。万一环境不同，重启循环会自动取证（端口探针 / MixIO 日志 / xdpyinfo / 双探针窗口自检）并轮换 4 种启动方式，把 `自动取证开始` 到 `自动取证结束` 之间的日志反馈即可，详见 [README.md](README.md) 的 Q11。
-- **MixMO（手机 App 设计）怎么进**：官方 MixSuite 2026-10-15 起的压缩包已内置 `mixmo/`（与 `mixly/`、`mixco/` 同级，解压即用；MixlyAI 包较大，需单独下载解压后放入套件根目录）。该版本官方桌面壳菜单和管理端已接入 MixMO，但服务端 `mixio.js` 还没挂 `/mixmo` 路由——**本镜像 v2.3.0 起入口脚本会自动给卷内 `mixio.js` 打幂等补丁**（首次前备份 `mixio.js.mixly-docker-orig`；官方在线更新覆盖后自动重打），补上 `/mixmo` 静态挂载和首页入口，直接访问 `https://<IP>:8443/mixmo` 即可。详见 [README.md](README.md) 的产品矩阵一节。
+- **容器反复重启、只活几秒、日志有 `XGetWindowAttributes failed for window 0`**：这是 NW.js 窗口层故障（窗口从未创建成功）。v2.1.0 已定位根因——官方启动器传给 `.host/nw` 的 `--ozone-platform=x11` 在 Xvfb 下建不了窗口；**v2.2.0 起默认启动方式已避开该参数（直连 `.host/nw`，不指定 ozone）**，升级后即恢复正常。详见下节[排障存档](#排障存档短命-0-退出与启动策略轮换)。
+- **MixMO（手机 App 设计）怎么进**：官方 MixSuite 2026-10-15 起的压缩包已内置 `mixmo/`（与 `mixly/`、`mixco/` 同级，解压即用；MixlyAI 包较大，需单独下载解压后放入套件根目录）。该版本官方桌面壳菜单和管理端已接入 MixMO，但服务端 `mixio.js` 还没挂 `/mixmo` 路由——**本镜像 v2.3.0 起入口脚本会自动给卷内 `mixio.js` 打幂等补丁**（首次前备份 `mixio.js.mixly-docker-orig`；官方在线更新覆盖后自动重打），补上 `/mixmo` 静态挂载和首页入口，直接访问 `https://<IP>:8443/mixmo` 即可。详见 [README.md](README.md#升级-mixsuite-运行包保留数据)。
+
+## 排障存档：短命-0 退出与启动策略轮换
+
+> 这是开发期定位「容器反复重启、退出码 0、日志空白」时留下的完整链路。**v2.2.0 起默认启动方式已避开根因**，正常情况下无需阅读本节；仅在升级后仍复现、或需要向维护者反馈时使用。
+
+### 故障为何不可见
+
+`MixlyServer` 是 `fork` + `execv` 的壳：父进程负责打印 `Checking ports` / `Starting NW runtime` 等进度，但**父进程 stdout 在管道下是全缓冲**，容器非 TTY 时这些消息随缓冲区一起丢失。同时 `mixio.js` 顶层 `daemon_start().then(...)` 没有 `.catch`、`JSON.parse(fs.readFileSync(filterPath))` 没有 try/catch，异常被吞后外壳继续探测 8443，60 秒（120×500ms）后放弃并以**退出码 0** 结束——于是 `docker logs` 里什么真实原因都看不到。
+
+### 三层触发路径与现状
+
+| # | 触发点 | 症状 | 处理 |
+|---|---|---|---|
+| 1 | `storage` 目录存在但缺 `reserve/filter.json`（官方只在 `storage` 不存在时才创建它） | 约 120 秒后退出码 0 | v2.0.6 起入口脚本预置并校验 `filter.json` |
+| 2 | `mixio-app` 目录对 mixly 用户不可写（`store`/`logs`/`config` 建不出来） | 约 120 秒后退出码 0，或 `EACCES: mkdir` | v2.0.7 起预建目录并 `chmod a+rwX`；virtiofs/NFS 上 `chown` 无效是根因 |
+| 3 | NW 窗口层：官方启动器的 `--ozone-platform=x11` 在 Xvfb 下建不了窗口（`window 0`） | **只活 2~3 秒**、退出码 0、`nw-main-error.log` 无新内容 | v2.2.0 起默认直连 `.host/nw` 且不指定 ozone |
+
+判据：**存活 <15 秒指向窗口层（路径 3），≥15 秒才指向就绪探测超时（路径 1/2）**。
+
+曾被实证证伪的猜测（避免重复走弯路）：残留 PID 误杀 Xvfb、`/dev/shm` 不足（那是退出码 139 SIGSEGV）、证书问题（`package.json` 已含 `--ignore-certificate-errors`）、端口冲突触发 `Continue? [y/N]`、dbus 报错。
+
+### 自动取证与策略轮换
+
+连续「短命-0」失败时，入口脚本会打印 `自动取证开始 … 自动取证结束`，内容包含：8443 端口探针（1s 间隔，启动即开始）、`mixio-app/logs` 末 15 行、`runtime/nw-main-error.log`、进程与 Xvfb 状态、`xdpyinfo`（X visual/扩展）、NW.js 最小窗口自检（无 ozone 主探针 + ozone 对照探针）。
+
+同时重启循环本身变成 A/B 实验，每次失败切换一种启动方式，日志打印 `启动策略 N/4`：
+
+| 策略 | 启动方式 | 验证的假设 |
+|---|---|---|
+| 1 | 直连 `.host/nw`，**不指定 ozone**（**默认**） | 基线 |
+| 2 | 官方启动器（经 `stdbuf` 强制行缓冲，进度不再丢失） | 官方路径 |
+| 3 | 直连 + 强制 ozone x11 | 隔离 ozone 因素（已证实是根因） |
+| 4 | 直连 + `--disable-features=CalculateNativeWinOcclusion` | 无窗口管理器时遮挡检测是否干扰 |
+
+只有「进程自己短命-0 退出」才推进策略；`docker stop`、崩溃、超时都会重置计数。计数在挂载卷的 `mixio-app/runtime/boot-attempt`（1~4），也可用环境变量 `MIXLY_STRATEGY=1~4` 显式固定（优先级更高）。
+
+### 手动诊断开关
+
+| 变量 | 作用 |
+|---|---|
+| `MIXLY_NW_SELFTEST=1` | 仅用最小 NW 应用测「本容器能否建窗口」，然后退出。探针 A（无 ozone）通过 = 镜像依赖齐备、问题在应用层；A 失败 = 镜像/环境问题，反馈完整日志（含 `xdpyinfo`） |
+| `MIXLY_DIRECT_NW=1` | 固定直连 `.host/nw` 并追加 `--enable-logging=stderr`，把 Chromium 的窗口创建、GPU 与渲染进程状态全打出来 |
+
+```bash
+docker run --rm -e MIXLY_NW_SELFTEST=1 \
+  -v /你的路径/mixly_server:/opt/mixly_server \
+  ghcr.io/realkiro/mixly-server:latest
+```
+
+### `nw-main-error.log` 判读
+
+入口脚本会把该文件内容自动打印到 `docker logs`，并把上一次的轮换为 `.prev`（避免旧错误被误读为新故障）。按关键字分流：
+
+| 关键字 | 含义 | 处理 |
+|---|---|---|
+| `EACCES: permission denied, mkdir` | `mixio-app` 对 mixly 不可写 | 宿主机 `chmod -R a+rwX <mixio-app 所在目录>`；挂载源若是 NFS/CIFS/Windows 共享，改本地 ext4 目录 |
+| `Cannot find module 'node:sqlite'` | NW.js 内置 Node 版本过旧 | 属官方包问题，反馈给米思奇官方 |
