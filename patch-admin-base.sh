@@ -13,7 +13,8 @@
 #      /admin/js/…→/js/…），未登录时的 res.redirect('/') 改为跳 <BASE>/（登录页）；
 #   2) ejs/admin.ejs、ejs/manage.ejs：注入 <base href="<BASE>/">，并把少数以 /
 #      开头的 URL 改成相对路径（adminLogin、saveAndRestart、stop、start、
-#      api/check-update、api/exit-after-update、?page= 导航等）；
+#      api/check-update、api/exit-after-update、api/download（在线更新 SSE 进度）、
+#      ?page= 导航等）；
 #   3) js/login.js（含 Mixly 编辑器内嵌页副本 mixly/mixvm/mixio/js/login.js）：
 #      首页“管理后台”链接在标准端口（443/无端口）下指向 <BASE>，非标准端口
 #      仍指向 :18084（本地直连 8443 时不退化）。
@@ -243,6 +244,7 @@ if [ -f "$TPL/manage.ejs" ]; then
         -e "s|fetch('/api/check-update'|fetch('api/check-update'|" \
         -e "s|fetch('/api/exit-after-update'|fetch('api/exit-after-update'|" \
         -e "s|fetch('/stop'|fetch('stop'|" \
+        -e 's|EventSource(`/api/download|EventSource(`api/download|' \
         -e 's|href="index"|href="admin"|' \
         "$TPL/manage.ejs" > "$RT/manage.ejs.patched" 2>/dev/null &&
     cat "$RT/manage.ejs.patched" > "$TPL/manage.ejs" 2>/dev/null ||
