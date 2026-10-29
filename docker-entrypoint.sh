@@ -392,6 +392,39 @@ PATCH_EOF
         fi
     done
 
+    # --- 2b) 运行时兜底：把根路径请求补上前缀 ---
+    # sed 只能命中已知写法；不同官方版本的写法会变（反引号 / 单引号 / 双引号、
+    # 或字符串拼接），漏一条就是 404。这里往页面注入一段极小的脚本，统一改写
+    # fetch / XHR / EventSource 的根路径 URL —— 不依赖模板写法，也不怕官方以后
+    # 新增接口。已经相对化的 URL 原样放行（由 <base> 解析）。
+    _snip="$_rt/admin-urlfix.snippet"
+    {
+        printf '    <script>/* [MIXLY_DOCKER_ADMIN_URLFIX] 根路径请求补前缀（MIXIO_ADMIN_BASE） */\n'
+        printf '    (function(){var b="%s";function fix(u){if(typeof u!=="string"||u.charAt(0)!=="/"||u.charAt(1)==="/")return u;if(u===b||u.indexOf(b+"/")===0)return u;return b+u;}var of=window.fetch;if(of){window.fetch=function(u){var a=[].slice.call(arguments);a[0]=fix(u);return of.apply(this,a);};}var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){var a=[].slice.call(arguments);a[1]=fix(u);return xo.apply(this,a);};var OE=window.EventSource;if(OE){var NE=function(u,c){return new OE(fix(u),c);};NE.prototype=OE.prototype;window.EventSource=NE;}})();\n' "$_base"
+        printf '    </script>\n'
+    } > "$_snip" 2>/dev/null
+    for _f in "$_tpl/admin.ejs" "$_tpl/manage.ejs"; do
+        [ -f "$_f" ] || continue
+        [ -s "$_snip" ] || break
+        awk -v snip="$_snip" '
+            /MIXLY_DOCKER_ADMIN_URLFIX/ { drop = 1; next }
+            drop && /<\/script>/ { drop = 0; next }
+            drop { next }
+            /<base href=/ && !ins {
+                print
+                while ((getline _l < snip) > 0) print _l
+                close(snip)
+                ins = 1
+                next
+            }
+            { print }
+        ' "$_f" > "$_rt/ejs.patched" 2>/dev/null &&
+        cat "$_rt/ejs.patched" > "$_f" 2>/dev/null &&
+        log "管理端前缀补丁：$(basename "$_f") 已注入运行时 URL 兜底（fetch/XHR/EventSource）" ||
+            warn "管理端前缀补丁：注入 $(basename "$_f") 的运行时兜底失败"
+    done
+    rm -f "$_snip" 2>/dev/null || true
+
     if [ -f "$_tpl/admin.ejs" ]; then
         sed -e "s|\$.post('/adminLogin'|\$.post('adminLogin'|g" \
             "$_tpl/admin.ejs" > "$_rt/admin.ejs.patched" 2>/dev/null &&
@@ -407,6 +440,8 @@ PATCH_EOF
             -e "s|fetch('/api/exit-after-update'|fetch('api/exit-after-update'|" \
             -e "s|fetch('/stop'|fetch('stop'|" \
             -e 's|EventSource(`/api/download|EventSource(`api/download|' \
+            -e 's|EventSource("/api/download|EventSource("api/download|' \
+            -e "s|EventSource('/api/download|EventSource('api/download|" \
             -e 's|href="index"|href="admin"|' \
             "$_tpl/manage.ejs" > "$_rt/manage.ejs.patched" 2>/dev/null &&
         cat "$_rt/manage.ejs.patched" > "$_tpl/manage.ejs" 2>/dev/null ||

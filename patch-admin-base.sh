@@ -229,6 +229,38 @@ for _f in "$TPL/admin.ejs" "$TPL/manage.ejs"; do
     rm -f "$RT/ejs.patched" 2>/dev/null || true
 done
 
+# ---------------------------------------- 2b) 运行时兜底：根路径请求补前缀
+# sed 只能命中已知写法；官方不同版本写法会变（反引号 / 单引号 / 双引号、字符串
+# 拼接），漏一条就是 404。这里往页面注入一段极小的脚本，统一改写
+# fetch / XHR / EventSource 的根路径 URL —— 不依赖模板写法，也不怕新增接口。
+SNIP="$RT/admin-urlfix.snippet"
+{
+    printf '    <script>/* [MIXLY_DOCKER_ADMIN_URLFIX] 根路径请求补前缀（BASE=%s） */\n' "$BASE"
+    printf '    (function(){var b="%s";function fix(u){if(typeof u!=="string"||u.charAt(0)!=="/"||u.charAt(1)==="/")return u;if(u===b||u.indexOf(b+"/")===0)return u;return b+u;}var of=window.fetch;if(of){window.fetch=function(u){var a=[].slice.call(arguments);a[0]=fix(u);return of.apply(this,a);};}var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){var a=[].slice.call(arguments);a[1]=fix(u);return xo.apply(this,a);};var OE=window.EventSource;if(OE){var NE=function(u,c){return new OE(fix(u),c);};NE.prototype=OE.prototype;window.EventSource=NE;};})();\n' "$BASE"
+    printf '    </script>\n'
+} > "$SNIP" 2>/dev/null
+for _f in "$TPL/admin.ejs" "$TPL/manage.ejs"; do
+    [ -f "$_f" ] || continue
+    awk -v snip="$SNIP" '
+        /MIXLY_DOCKER_ADMIN_URLFIX/ { drop = 1; next }
+        drop && /<\/script>/ { drop = 0; next }
+        drop { next }
+        /<base href=/ && !ins {
+            print
+            while ((getline _l < snip) > 0) print _l
+            close(snip)
+            ins = 1
+            next
+        }
+        { print }
+    ' "$_f" > "$RT/ejs.patched" 2>/dev/null &&
+    cat "$RT/ejs.patched" > "$_f" 2>/dev/null &&
+    log "$(basename "$_f") 已注入运行时 URL 兜底（fetch/XHR/EventSource）" ||
+        warn "注入 $(basename "$_f") 的运行时兜底失败"
+    rm -f "$RT/ejs.patched" 2>/dev/null || true
+done
+rm -f "$SNIP" 2>/dev/null || true
+
 if [ -f "$TPL/admin.ejs" ]; then
     sed -e "s|\$.post('/adminLogin'|\$.post('adminLogin'|g" \
         "$TPL/admin.ejs" > "$RT/admin.ejs.patched" 2>/dev/null &&
@@ -245,6 +277,8 @@ if [ -f "$TPL/manage.ejs" ]; then
         -e "s|fetch('/api/exit-after-update'|fetch('api/exit-after-update'|" \
         -e "s|fetch('/stop'|fetch('stop'|" \
         -e 's|EventSource(`/api/download|EventSource(`api/download|' \
+        -e 's|EventSource("/api/download|EventSource("api/download|' \
+        -e "s|EventSource('/api/download|EventSource('api/download|" \
         -e 's|href="index"|href="admin"|' \
         "$TPL/manage.ejs" > "$RT/manage.ejs.patched" 2>/dev/null &&
     cat "$RT/manage.ejs.patched" > "$TPL/manage.ejs" 2>/dev/null ||
