@@ -279,6 +279,7 @@ if [ -f "$TPL/manage.ejs" ]; then
         -e 's|EventSource(`/api/download|EventSource(`api/download|' \
         -e 's|EventSource("/api/download|EventSource("api/download|' \
         -e "s|EventSource('/api/download|EventSource('api/download|" \
+        -e "s|'/api/download|'api/download|g" \
         -e 's|href="index"|href="admin"|' \
         "$TPL/manage.ejs" > "$RT/manage.ejs.patched" 2>/dev/null &&
     cat "$RT/manage.ejs.patched" > "$TPL/manage.ejs" 2>/dev/null ||
