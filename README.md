@@ -83,9 +83,11 @@ docker compose up -d
 
 入口脚本每次启动自动做三处适配（未设置时完全不改官方文件）：
 
-1. 管理端路由剥掉 `/admin` 前缀：`/admin/` 登录页、`/admin/admin` 面板、`/admin/js/…` 静态资源；
+1. 管理端路由剥掉 `/admin` 前缀：`/admin/` 登录页、`/admin/admin` 面板、`/admin/js/…` 静态资源、`/admin/api/…` 在线更新接口；
 2. 管理端模板注入 `<base href="/admin/">` 并把根路径 URL 相对化；未登录跳 `/admin/`（不再弹回 MixIO 首页）；
 3. 首页"管理后台"链接：标准端口（443 / 无端口）指向 `/admin`，其它端口仍指 `:18084`（本地直连 8443 不受影响）。
+
+> **在线更新**（面板里的“检查更新 / 一键更新”）调的是 `POST /api/check-update` 和 `GET /api/download`（EventSource 推 SSE 进度），两个都是根路径，必须一并相对化，否则点更新立刻 404。另外更新包会把 `mixio.js`、`ejs/`、`js/` 整包替换、补丁标记丢失，而更新只重启 node 进程、不重启容器——入口脚本因此挂了个 5 秒轮询的观察者，检测到标记丢失就自动重打（日志：`检测到运行包被在线更新覆盖`）。模板是 `ejs.renderFile` 每次读盘，改完立即生效；`mixio.js` 要进程重启才生效，更新流程本身会重启进程，通常正好接上。万一更新后 `/admin` 仍 404，`docker compose restart mixly` 一次即可。
 
 **启用方式（三选一）**
 

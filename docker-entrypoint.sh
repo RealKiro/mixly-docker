@@ -406,6 +406,7 @@ PATCH_EOF
             -e "s|fetch('/api/check-update'|fetch('api/check-update'|" \
             -e "s|fetch('/api/exit-after-update'|fetch('api/exit-after-update'|" \
             -e "s|fetch('/stop'|fetch('stop'|" \
+            -e 's|EventSource(`/api/download|EventSource(`api/download|' \
             -e 's|href="index"|href="admin"|' \
             "$_tpl/manage.ejs" > "$_rt/manage.ejs.patched" 2>/dev/null &&
         cat "$_rt/manage.ejs.patched" > "$_tpl/manage.ejs" 2>/dev/null ||
@@ -488,6 +489,38 @@ patch_admin_link() {
             warn "管理端入口链接：改写 ${_lf#$SERVER_DIR/} 失败（卷不可写？）"
         rm -f "$_rt/login-url.patched" 2>/dev/null || true
     done
+}
+
+# ------------------------------------------------ 管理端前缀补丁：在线更新后自愈
+# 后台“在线更新”会把 mixio-app 整包换成官方文件，补丁标记随之丢失；而更新只重启
+# node 进程、不一定重启容器，入口脚本不会重跑 —— 表现为刚更新完 /admin 就打不开
+# （第一次点击“检查更新”时更直接：/api/download 是根路径，反代下直接 404）。
+# 这里起一个轻量观察者：检测到文件被替换（mtime 变化且标记缺失）就重打补丁。
+# 模板走 ejs.renderFile，每次请求读盘，改完立即生效；mixio.js 要进程重启才生效，
+# 而更新流程本身会重启进程，通常正好接上；万一没接上，重启容器一次即可。
+watch_admin_base() {
+    [ -n "${MIXIO_ADMIN_BASE:-}" ] || return 0
+    (
+        _last=""
+        while :; do
+            sleep 5
+            _sig=""
+            for _f in "$APP_DIR/mixio.js" "$APP_DIR/ejs/admin.ejs" "$APP_DIR/ejs/manage.ejs"; do
+                _sig="$_sig$(stat -c %Y "$_f" 2>/dev/null || echo 0):"
+            done
+            [ "$_sig" = "$_last" ] && continue
+            _last="$_sig"
+            _need=0
+            for _f in "$APP_DIR/mixio.js" "$APP_DIR/ejs/admin.ejs" "$APP_DIR/ejs/manage.ejs"; do
+                [ -f "$_f" ] || continue
+                grep -q "MIXLY_DOCKER_ADMIN_BASE_PATCH" "$_f" 2>/dev/null || _need=1
+            done
+            if [ "$_need" = "1" ]; then
+                log "检测到运行包被在线更新覆盖，重新注入管理端 ${MIXIO_ADMIN_BASE} 前缀支持"
+                patch_admin_base
+            fi
+        done
+    ) &
 }
 
 # ---------------------------------------------------------------- root 准备
@@ -832,6 +865,9 @@ patch_mixmo_support
 # 管理端反代前缀补丁的同样兜底（非 root 时若卷不可写会告警，不影响启动）
 patch_admin_base
 patch_admin_link
+
+# 在线更新会用官方文件覆盖 mixio-app，这里挂一个观察者做自愈（未设置前缀时直接返回）
+watch_admin_base
 
 # ------------------------------------------- NW.js 调用参数（与官方启动器一致）
 # 从官方 MixlyServer 二进制里提取到的真实调用形式（见其字符串表）：
