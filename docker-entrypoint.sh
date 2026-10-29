@@ -442,6 +442,7 @@ PATCH_EOF
             -e 's|EventSource(`/api/download|EventSource(`api/download|' \
             -e 's|EventSource("/api/download|EventSource("api/download|' \
             -e "s|EventSource('/api/download|EventSource('api/download|" \
+            -e "s|'/api/download|'api/download|g" \
             -e 's|href="index"|href="admin"|' \
             "$_tpl/manage.ejs" > "$_rt/manage.ejs.patched" 2>/dev/null &&
         cat "$_rt/manage.ejs.patched" > "$_tpl/manage.ejs" 2>/dev/null ||

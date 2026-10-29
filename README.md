@@ -87,7 +87,14 @@ docker compose up -d
 2. 管理端模板注入 `<base href="/admin/">` 并把根路径 URL 相对化，同时注入一段运行时兜底脚本（改写页面里 `fetch` / `XMLHttpRequest` / `EventSource` 的根路径 URL）；未登录跳 `/admin/`（不再弹回 MixIO 首页）；
 3. 首页"管理后台"链接：标准端口（443 / 无端口）指向 `/admin`，其它端口仍指 `:18084`（本地直连 8443 不受影响）。
 
-> **为什么还要运行时兜底**：官方不同版本里同一处调用的写法会变（反引号 / 单引号 / 双引号模板串、字符串拼接），靠 `sed` 逐条改写必然会漏——漏一条就是一个 404。注入的脚本以页面为单位统一改写，不依赖写法，官方以后新增接口也自动覆盖。已相对化的 URL 原样放行，`https://…` 与 `//cdn…` 不动。
+> **为什么还要运行时兜底**：官方不同版本里同一处调用的写法会变，靠 `sed` 逐条改写必然会漏——漏一条就是一个 404。实测 MixIO 2026.10.26 版把下载地址**先拼进变量再 new EventSource(q)**：
+>
+> ```js
+> var q = '/api/download?url=' + encodeURIComponent(url) + '&cloudVersion=' + … ;
+> eventSource = new EventSource(q);        // ← 对 EventSource(...) 做替换永远命中不了
+> ```
+>
+> 所以除了改写 `'/api/download` 这类字符串常量，页面里还会注入一段脚本统一改写 `fetch` / `XMLHttpRequest` / `EventSource` 的根路径 URL，不依赖写法，官方以后新增接口也自动覆盖。已相对化的 URL 原样放行，`https://…`、`//cdn…` 不动。
 
 > **在线更新**（面板里的“检查更新 / 一键更新”）调的是 `POST /api/check-update` 和 `GET /api/download`（EventSource 推 SSE 进度），两个都是根路径，不处理就会 404。另外更新包会把 `mixio.js`、`ejs/`、`js/` 整包替换、补丁标记丢失，而更新只重启 node 进程、不重启容器——入口脚本因此挂了个 5 秒轮询的观察者，检测到标记丢失就自动重打（日志：`检测到运行包被在线更新覆盖`）。模板是 `ejs.renderFile` 每次读盘，改完立即生效；`mixio.js` 要进程重启才生效，更新流程本身会重启进程，通常正好接上。万一更新后 `/admin` 仍 404，`docker compose restart mixly` 一次即可。
 
