@@ -943,4 +943,66 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t20_fail" ] || fail "T20 $t20_fail"
 ok "T20 套件根对 mixly 可建目录/可改名、mixio-app 可写（更新不再 EACCES），戳文件免重复 chmod"
 
-echo "🎉 冒烟测试全部通过: $PASS/21"
+echo "=== T21 首页“管理后台”链接：官方新拼法也能校正 ==="
+# 背景：官方 2026.10.30 起把链接改成「先算变量再拼」：
+#   var __adminPort = parseInt(window.__MIXIO_ADMIN_PORT__, 10) || 18084
+#   href: "https://" + __adminHost + ":" + __adminPort
+# 行级 awk（要求 :18084 与 href: 同一行）一行都命不中 → 首页仍链到 域名:18084，
+# 而该端口既不在隧道转发里也不在 Cloudflare 可代理端口内，点了必然打不开。
+# 本用例用这种新写法锁定「运行时兜底」：login.js 末尾必须追加校正块，
+# 且重跑不重复追加。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+mkdir -p "$tmp/mixio-app/js"
+cat > "$tmp/mixio-app/js/login.js" <<'LOGINJS'
+$(function() {
+    var __adminHost = window.location.href.split("//")[1].split(":")[0].replace("/", "")
+    var __adminPort = parseInt(window.__MIXIO_ADMIN_PORT__, 10) || 18084
+    $("#admin").attr({
+        href: "https://" + __adminHost + ":" + __adminPort,
+        target: "_blank"
+    })
+})
+LOGINJS
+t21_fail=""
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -e MIXIO_ADMIN_BASE=/admin \
+    -v "$tmp:/opt/mixly_server" "$IMAGE")
+wait_log "$cid" "stub MixlyServer running" 60 || t21_fail="桩未被 exec"
+if [ -z "$t21_fail" ]; then
+    log_has "$cid" "链接已校正为 /admin/" || t21_fail="未见链接兜底日志"
+    grep -q "MIXLY_DOCKER_ADMIN_LINK_BEGIN" "$tmp/mixio-app/js/login.js" 2>/dev/null \
+        || t21_fail="login.js 未追加链接兜底块"
+    grep -q 'B="/admin/"' "$tmp/mixio-app/js/login.js" 2>/dev/null \
+        || t21_fail="兜底块缺 BASE 取值"
+    grep -q "window.jQuery(function" "$tmp/mixio-app/js/login.js" 2>/dev/null \
+        || t21_fail="兜底块未经 window.jQuery 注册（拿不到 ready 时机）"
+    # 官方原拼接必须保留：只在运行时覆盖，不删它的代码（更抗版本变化）
+    grep -q '__adminPort' "$tmp/mixio-app/js/login.js" 2>/dev/null \
+        || t21_fail="兜底把官方原逻辑删掉了（应保留，仅运行时覆盖）"
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+# 重跑：不得重复追加（标记块先摘后加）
+if [ -z "$t21_fail" ]; then
+    _h1=$(md5sum "$tmp/mixio-app/js/login.js" 2>/dev/null | cut -d' ' -f1)
+    cid=$(docker run -d -e MIXLY_STRATEGY=2 -e MIXIO_ADMIN_BASE=/admin \
+        -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "stub MixlyServer running" 60 || t21_fail="第 2 次桩未被 exec"
+    if [ -z "$t21_fail" ]; then
+        _h2=$(md5sum "$tmp/mixio-app/js/login.js" 2>/dev/null | cut -d' ' -f1)
+        [ "$_h1" = "$_h2" ] || t21_fail="重跑后 login.js 变化（幂等失效）"
+        [ "$(grep -c "MIXLY_DOCKER_ADMIN_LINK_BEGIN" "$tmp/mixio-app/js/login.js" 2>/dev/null)" = "1" ] \
+            || t21_fail="兜底块重复追加"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+if [ -n "$t21_fail" ]; then
+    echo "----- 容器日志（末 25 行）----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+    echo "----- login.js 末尾 -----"
+    tail -8 "$tmp/mixio-app/js/login.js" 2>&1 || true
+fi
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t21_fail" ] || fail "T21 $t21_fail"
+ok "T21 新版 login.js 拼法下首页“管理后台”链接被校正为 <base>/，重跑幂等"
+
+echo "🎉 冒烟测试全部通过: $PASS/22"
