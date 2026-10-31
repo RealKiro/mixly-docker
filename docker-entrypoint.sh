@@ -426,7 +426,17 @@ PATCH_EOF
     _snip="$_rt/admin-urlfix.snippet"
     {
         printf '    <script>/* [MIXLY_DOCKER_ADMIN_URLFIX] 根路径请求补前缀（MIXIO_ADMIN_BASE） */\n'
-        printf '    (function(){var b="%s";function fix(u){if(typeof u!=="string"||u.charAt(0)!=="/"||u.charAt(1)==="/")return u;if(u===b||u.indexOf(b+"/")===0)return u;return b+u;}var of=window.fetch;if(of){window.fetch=function(u){var a=[].slice.call(arguments);a[0]=fix(u);return of.apply(this,a);};}var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){var a=[].slice.call(arguments);a[1]=fix(u);return xo.apply(this,a);};var OE=window.EventSource;if(OE){var NE=function(u,c){return new OE(fix(u),c);};NE.prototype=OE.prototype;window.EventSource=NE;}})();\n' "$_base"
+        # cf()：Cloudflare 在回源 HTML 里插的 RUM 探针（/cdn-cgi/rum）用的是相对路径，
+        # 会被 <base href="<前缀>/"> 改锚成 <前缀>/cdn-cgi/rum → 落到本服务 → 404。
+        # 这类 cdn-cgi 请求本来就该由 Cloudflare 边缘处理，一律还原成根路径。
+        # sendBeacon 也要包一层：RUM 上报走的就是它，不在 fetch/XHR 的覆盖范围内。
+        printf '    (function(){var b="%s";function cf(u){var i=u.indexOf("cdn-cgi/");return i>-1?"/"+u.slice(i):u;}\n' "$_base"
+        printf '    function fix(u){if(typeof u!=="string")return u;var v=cf(u);if(v!==u)return v;if(u.charAt(0)!=="/"||u.charAt(1)==="/")return u;if(u===b||u.indexOf(b+"/")===0)return u;return b+u;}\n'
+        printf '    var of=window.fetch;if(of){window.fetch=function(u){var a=[].slice.call(arguments);a[0]=fix(u);return of.apply(this,a);};}\n'
+        printf '    var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){var a=[].slice.call(arguments);a[1]=fix(u);return xo.apply(this,a);};\n'
+        printf '    var OE=window.EventSource;if(OE){var NE=function(u,c){return new OE(fix(u),c);};NE.prototype=OE.prototype;window.EventSource=NE;}\n'
+        printf '    try{if(navigator.sendBeacon){var sb=navigator.sendBeacon.bind(navigator);navigator.sendBeacon=function(u,d){try{return sb(fix(u),d);}catch(e){return false;}};}}catch(e){}\n'
+        printf '    })();\n'
         printf '    </script>\n'
     } > "$_snip" 2>/dev/null
     for _f in "$_tpl/admin.ejs" "$_tpl/manage.ejs"; do
