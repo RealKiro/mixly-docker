@@ -276,6 +276,48 @@ PATCH_EOF
 #      非标准端口仍指向 :18084，本地直连 8443 时不退化。
 # 幂等：1/3 用标记和特征匹配，重复执行结果一致；官方在线更新覆盖 mixio.js 后
 # （标记丢失）下次启动自动重打。
+
+# ------------------------------------- 首页“管理后台”链接：运行时兜底
+# 官方 2026.10.30 起把链接改成「先算 __adminHost / __adminPort，再拼 href」：
+#   var __adminPort = parseInt(window.__MIXIO_ADMIN_PORT__, 10) || 18084
+#   href: "https://" + __adminHost + ":" + __adminPort
+# 原先按行改写的 awk 要求 `:18084` 与 `href:` 出现在同一行，新版把两者拆开，
+# 一行都命中不了 → 首页仍链到 https://域名:18084。而 18084 既不在隧道转发里、
+# 也不在 Cloudflare 可代理端口列表内，点了必然打不开（现象：页脚“管理后台”
+# 指向 域名:18084）。
+# 这里不再猜官方拼法：往 login.js 末尾追加一小段脚本，等官方 ready 执行完后再
+# 把 #admin 的 href 校正过来，点击时再兜一层。官方以后怎么拼都不受影响。
+#   $1=login.js  $2=绝对地址(MIXIO_ADMIN_URL)  $3=路径前缀(MIXIO_ADMIN_BASE)
+admin_link_shim() {
+    _lf="$1"; _lu="${2:-}"; _lb="${3:-}"
+    [ -f "$_lf" ] || return 0
+    [ -n "$_lu$_lb" ] || return 0
+    # 先摘掉上次追加的块（幂等），再追加新的
+    awk '
+        /\[MIXLY_DOCKER_ADMIN_LINK_BEGIN\]/ { skip = 1; next }
+        skip && /\[MIXLY_DOCKER_ADMIN_LINK_END\]/ { skip = 0; next }
+        skip { next }
+        { print }
+    ' "$_lf" > "$_lf.mixly-shim" 2>/dev/null &&
+        cat "$_lf.mixly-shim" > "$_lf" 2>/dev/null || {
+            rm -f "$_lf.mixly-shim" 2>/dev/null || true
+            return 1
+        }
+    rm -f "$_lf.mixly-shim" 2>/dev/null || true
+    {
+        printf ';/* [MIXLY_DOCKER_ADMIN_LINK_BEGIN] 首页“管理后台”链接兜底：不依赖官方拼法 */\n'
+        printf '(function(){var U="%s",B="%s";var w=U||((B&&(window.location.port===""||window.location.port==="443"))?B:"");if(!w)return;\n' "$_lu" "$_lb"
+        printf 'function F(){var a=document.getElementById("admin");if(a&&a.getAttribute("href")!==w)a.setAttribute("href",w);}\n'
+        printf 'F();if(window.jQuery){window.jQuery(function(){F();setTimeout(F,0);setTimeout(F,300);});}window.addEventListener("load",F);\n'
+        printf 'document.addEventListener("click",function(e){var t=e.target;while(t&&t!==document){if(t.id==="admin"){if((t.getAttribute("href")||"")!==w){e.preventDefault();window.open(w,"_blank","noopener");}return;}t=t.parentNode;}},true);})();\n'
+        printf '/* [MIXLY_DOCKER_ADMIN_LINK_END] */\n'
+    } >> "$_lf" 2>/dev/null || {
+        warn "首页“管理后台”链接兜底：写入 $(basename "$_lf") 失败（卷不可写？）"
+        return 1
+    }
+    return 0
+}
+
 patch_admin_base() {
     _base="${MIXIO_ADMIN_BASE:-}"
     _base="${_base%/}"
@@ -514,33 +556,43 @@ PATCH_EOF
     fi
 
     # --- 3) 首页“管理后台”链接：标准端口指向 <base>，非标准端口保留 :18084 ---
+    # 下面的行级替换只对「:18084 与 href: 同一行」的旧版官方有效；新版把拼接改成
+    # __adminHost/__adminPort 变量，命不中，真正兜底的是 admin_link_shim()。
     _lj="$APP_DIR/js/login.js"
-    if [ -f "$_lj" ] && grep -q ":18084" "$_lj" 2>/dev/null; then
-        awk -v base="$_base" '
-            index($0, ":18084") && index($0, "href:") {
-                print "        href: (window.MIXIO_ADMIN_URL || ((window.location.port === \"\" || window.location.port === \"443\") ? \"" base "\" : \"https://\" + window.location.hostname + \":18084\")),"
-                next
-            }
-            { print }
-        ' "$_lj" > "$_rt/login.js.patched" 2>/dev/null &&
-        cat "$_rt/login.js.patched" > "$_lj" 2>/dev/null &&
-        log "管理端前缀补丁：首页“管理后台”链接已适配（443 → ${_base}，其它端口保留 :18084）" ||
-            warn "管理端前缀补丁：改写 js/login.js 失败"
+    if [ -f "$_lj" ]; then
+        if grep -q ":18084" "$_lj" 2>/dev/null; then
+            awk -v base="$_base" '
+                index($0, ":18084") && index($0, "href:") {
+                    print "        href: (window.MIXIO_ADMIN_URL || ((window.location.port === \"\" || window.location.port === \"443\") ? \"" base "\" : \"https://\" + window.location.hostname + \":18084\")),"
+                    next
+                }
+                { print }
+            ' "$_lj" > "$_rt/login.js.patched" 2>/dev/null &&
+            cat "$_rt/login.js.patched" > "$_lj" 2>/dev/null ||
+                warn "管理端前缀补丁：改写 js/login.js 失败"
+        fi
+        admin_link_shim "$_lj" "" "${_base}/" &&
+            log "管理端前缀补丁：首页“管理后台”链接已校正为 ${_base}/（运行时兜底）" ||
+                warn "管理端前缀补丁：js/login.js 链接兜底注入失败"
     fi
 
     # Mixly 编辑器内嵌页的同一逻辑副本（pure-web 版），一并适配
     _lj2="$SERVER_DIR/mixly/mixvm/mixio/js/login.js"
-    if [ -f "$_lj2" ] && grep -q ":18084" "$_lj2" 2>/dev/null; then
-        awk -v base="$_base" '
-            index($0, ":18084") && index($0, "attr(\"href\"") {
-                print "        $(\"#admin\").attr(\"href\", window.MIXIO_ADMIN_URL || ((window.location.port === \"\" || window.location.port === \"443\") ? \"" base "\" : \"https://\" + window.location.hostname + \":18084\"))"
-                next
-            }
-            { print }
-        ' "$_lj2" > "$_rt/login2.js.patched" 2>/dev/null &&
-        cat "$_rt/login2.js.patched" > "$_lj2" 2>/dev/null &&
-        log "管理端前缀补丁：pure-web 副本（mixly/mixvm/mixio/js/login.js）已同步适配" ||
-            warn "管理端前缀补丁：改写 pure-web login.js 失败"
+    if [ -f "$_lj2" ]; then
+        if grep -q ":18084" "$_lj2" 2>/dev/null; then
+            awk -v base="$_base" '
+                index($0, ":18084") && index($0, "attr(\"href\"") {
+                    print "        $(\"#admin\").attr(\"href\", window.MIXIO_ADMIN_URL || ((window.location.port === \"\" || window.location.port === \"443\") ? \"" base "\" : \"https://\" + window.location.hostname + \":18084\"))"
+                    next
+                }
+                { print }
+            ' "$_lj2" > "$_rt/login2.js.patched" 2>/dev/null &&
+            cat "$_rt/login2.js.patched" > "$_lj2" 2>/dev/null ||
+                warn "管理端前缀补丁：改写 pure-web login.js 失败"
+        fi
+        admin_link_shim "$_lj2" "" "${_base}/" &&
+            log "管理端前缀补丁：pure-web 副本（mixly/mixvm/mixio/js/login.js）链接已同步校正" ||
+                warn "管理端前缀补丁：pure-web login.js 链接兜底注入失败"
     fi
 
     rm -f "$_rt/admin-base-route.patch.js" "$_rt/admin-base-redirect.patch.js" \
@@ -569,25 +621,26 @@ patch_admin_link() {
 
     for _lf in "$APP_DIR/js/login.js" "$SERVER_DIR/mixly/mixvm/mixio/js/login.js"; do
         [ -f "$_lf" ] || continue
-        if grep -qF "$_url" "$_lf" 2>/dev/null; then
-            log "管理端入口链接：${_lf#$SERVER_DIR/} 已指向 ${_url}，跳过"
-            continue
+        # 行级改写只对旧版官方有效；新版（__adminHost/__adminPort 变量）靠下面的兜底
+        if grep -q ":18084" "$_lf" 2>/dev/null; then
+            awk -v url="$_url" '
+                index($0, ":18084") && index($0, "href:") {
+                    print "        href: (window.MIXIO_ADMIN_URL || \"" url "\"),"
+                    next
+                }
+                index($0, ":18084") && index($0, "attr(\"href\"") {
+                    print "        $(\"#admin\").attr(\"href\", window.MIXIO_ADMIN_URL || \"" url "\")"
+                    next
+                }
+                { print }
+            ' "$_lf" > "$_rt/login-url.patched" 2>/dev/null &&
+            cat "$_rt/login-url.patched" > "$_lf" 2>/dev/null ||
+                warn "管理端入口链接：改写 ${_lf#$SERVER_DIR/} 失败（卷不可写？）"
+            rm -f "$_rt/login-url.patched" 2>/dev/null || true
         fi
-        awk -v url="$_url" '
-            index($0, ":18084") && index($0, "href:") {
-                print "        href: (window.MIXIO_ADMIN_URL || \"" url "\"),"
-                next
-            }
-            index($0, ":18084") && index($0, "attr(\"href\"") {
-                print "        $(\"#admin\").attr(\"href\", window.MIXIO_ADMIN_URL || \"" url "\")"
-                next
-            }
-            { print }
-        ' "$_lf" > "$_rt/login-url.patched" 2>/dev/null &&
-        cat "$_rt/login-url.patched" > "$_lf" 2>/dev/null &&
-        log "管理端入口链接：${_lf#$SERVER_DIR/} → ${_url}" ||
-            warn "管理端入口链接：改写 ${_lf#$SERVER_DIR/} 失败（卷不可写？）"
-        rm -f "$_rt/login-url.patched" 2>/dev/null || true
+        admin_link_shim "$_lf" "$_url" "" &&
+            log "管理端入口链接：${_lf#$SERVER_DIR/} → ${_url}（运行时兜底）" ||
+                warn "管理端入口链接：${_lf#$SERVER_DIR/} 兜底注入失败"
     done
 }
 
