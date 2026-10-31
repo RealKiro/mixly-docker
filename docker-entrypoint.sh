@@ -671,41 +671,60 @@ if [ "$(id -u)" = "0" ]; then
 
     # ------------------------------------------------ 在线更新所需的写权限
     # 管理端「检查更新 / 一键更新」以 mixly 身份执行，官方流程会：
-    #   * 在套件根建 .mixio-app-stash / .mixly-suite-stash 暂存 overlay；
-    #   * 把 mixly/ 整夹 rename 成 mixly.bak-update，再 rename 新目录就位；
+    #   * 在套件根建 .mixio-app-stash / .mixly-suite-stash 暂存 overlay（仅 Mixly 通道）；
+    #   * 把 mixly/、mixco/ 整夹 rename 成 *.bak-update，再 rename 新目录就位；
     #   * 就地覆盖 mixio-app/ 内的文件，并在备份夹里删旧文件。
     # 官方包由宿主机解压/拷贝时属主是宿主机用户、目录 755、文件 644，以上每一步
-    # 都会 EACCES（实测：EACCES: permission denied, mkdir
-    # '/opt/mixly_server/.mixio-app-stash'），前端表现为「正在解压…」后直接失败。
+    # 都会 EACCES。实测两种表现，根因相同：
+    #   Mixly：EACCES: permission denied, mkdir '/opt/mixly_server/.mixio-app-stash'
+    #   MixCO：EACCES, Permission denied '/opt/mixly_server/mixco.bak-update'
+    #          （该通道无 stash，第一个写操作就是改名）
     #
     # 这里只改权限位、不改属主：宿主机用户仍是属主，管理权限不受影响。
     # 递归 chmod 只在需要时做一次（戳文件 + 探针），宿主机重新解压官方包后探针
     # 失败会自动重跑；更新包落地后新文件属主是 mixly，后续启动无需再遍历。
-    _perm_stamp="$APP_DIR/runtime/.suite-perms-ok"
-    _perm_need=1
-    if [ -f "$_perm_stamp" ]; then
-        if gosu mixly:mixly sh -c "
+    # 探针覆盖官方更新真正执行的每一步——只测 mkdir 会放过「能建目录、不能改名」
+    # 的半通状态（共享文件夹 ACL、sticky 位都会造成）：
+    #   1. mkdir/rmdir   → .mixio-app-stash / .mixly-suite-stash
+    #   2. rename 同目录 → mixly/ → mixly.bak-update、mixco/ → mixco.bak-update
+    #   3. 追加写文件   → 就地覆盖 mixio-app/ 内文件
+    _perm_probe="
             set -e
-            mkdir '$SERVER_DIR/.perm-probe' && rmdir '$SERVER_DIR/.perm-probe'
+            rm -rf '$SERVER_DIR/.perm-probe' '$SERVER_DIR/.perm-probe.bak-update'
+            mkdir '$SERVER_DIR/.perm-probe'
+            mv '$SERVER_DIR/.perm-probe' '$SERVER_DIR/.perm-probe.bak-update'
+            rm -rf '$SERVER_DIR/.perm-probe.bak-update'
             : >> '$APP_DIR/mixio.js'
             if [ -d '$SERVER_DIR/mixly' ]; then
                 : > '$SERVER_DIR/mixly/.perm-probe'
                 rm -f '$SERVER_DIR/mixly/.perm-probe'
-            fi
-        " 2>/dev/null; then
+            fi"
+    _perm_stamp="$APP_DIR/runtime/.suite-perms-ok"
+    _perm_need=1
+    if [ -f "$_perm_stamp" ]; then
+        if gosu mixly:mixly sh -c "$_perm_probe" 2>/dev/null; then
             _perm_need=0
+        else
+            warn "root: 套件写权限探针失败（戳文件过期），重新修正"
         fi
     fi
     if [ "$_perm_need" = "1" ]; then
         log "root: 修正套件写权限以支持在线更新（仅 chmod，不改属主）..."
         chmod a+rwX "$SERVER_DIR" 2>/dev/null || true
         chmod -R a+rwX "$SERVER_DIR" 2>/dev/null || true
-        if gosu mixly:mixly sh -c "mkdir '$SERVER_DIR/.perm-probe' && rmdir '$SERVER_DIR/.perm-probe'" 2>/dev/null; then
+        if gosu mixly:mixly sh -c "$_perm_probe" 2>/dev/null; then
             : > "$_perm_stamp" 2>/dev/null || true
             chmod a+rw "$_perm_stamp" 2>/dev/null || true
-            log "root: 在线更新写权限已就绪（套件根与 mixio-app/ 对 mixly 可写）"
+            log "root: 在线更新写权限已就绪（套件根可建目录/可改名，mixio-app/ 可写）"
         else
-            warn "root: 套件目录仍不可写（卷权限策略？），在线更新可能报 EACCES"
+            # chmod 无效的典型场景：共享文件夹开了 ACL / 只读快照 / 挂载参数限制。
+            # 说清是「建目录」还是「改名」失败，比只报一句「不可写」有用得多。
+            _perm_which="mkdir（套件根建不了目录）"
+            if gosu mixly:mixly sh -c "mkdir '$SERVER_DIR/.perm-probe2' && rmdir '$SERVER_DIR/.perm-probe2'" 2>/dev/null; then
+                _perm_which="rename（能建目录但改不了名：ACL / sticky 位）"
+            fi
+            warn "root: 套件目录仍不可写，失败点≈${_perm_which}；在线更新会报 EACCES"
+            rm -rf "$SERVER_DIR/.perm-probe2" 2>/dev/null || true
         fi
     fi
 

@@ -887,9 +887,11 @@ echo "=== T20 在线更新写权限（stash 目录 EACCES 回归）==="
 # 背景：官方更新流程以 mixly 身份在套件根建 .mixio-app-stash / .mixly-suite-stash、
 # 把 mixly/ rename 成备份、就地覆盖 mixio-app/ 内文件。宿主机解压的官方包属主是
 # 宿主机用户、目录 755、文件 644，容器内必然 EACCES（实测「正在解压…」后失败：
-# EACCES: permission denied, mkdir '/opt/mixly_server/.mixio-app-stash'）。
-# 入口脚本按需 chmod（不改属主），本用例锁定「mixly 能建 stash、能写 mixio-app
-# 内文件」，以及戳文件生效后不再重复递归 chmod。
+# EACCES: permission denied, mkdir '/opt/mixly_server/.mixio-app-stash'；
+# MixCO 通道没有 stash 步骤，第一个写操作就是 rename，于是同一根因报
+# EACCES, Permission denied '/opt/mixly_server/mixco.bak-update'）。
+# 入口脚本按需 chmod（不改属主），本用例锁定「mixly 能建 stash、能 rename、
+# 能写 mixio-app 内文件」，以及戳文件生效后不再重复递归 chmod。
 tmp=$(mktemp -d)
 make_pkg "$tmp" x86_64
 t20_fail=""
@@ -904,6 +906,13 @@ if [ -z "$t20_fail" ]; then
         || t20_fail="mixly 仍无法创建 .mixly-suite-stash"
     docker exec "$cid" gosu mixly:mixly sh -c 'echo x >> /opt/mixly_server/mixio-app/mixio.js' \
         || t20_fail="mixly 仍无法覆盖 mixio-app 内文件"
+    # rename 是 promoteStagingDir 的核心动作（mixly/ → mixly.bak-update、
+    # mixco/ → mixco.bak-update）。只测 mkdir 会漏掉「能建目录、不能改名」的半通状态。
+    docker exec "$cid" gosu mixly:mixly sh -c '
+        mkdir /opt/mixly_server/mixco-probe &&
+        mv /opt/mixly_server/mixco-probe /opt/mixly_server/mixco-probe.bak-update &&
+        rm -rf /opt/mixly_server/mixco-probe.bak-update' \
+        || t20_fail="mixly 仍无法在套件根 rename（在线更新 promote 会 EACCES）"
     [ -d "$tmp/.mixio-app-stash" ] || t20_fail="宿主机看不到 stash 目录（写到了别处？）"
 fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
@@ -926,6 +935,6 @@ if [ -n "$t20_fail" ]; then
 fi
 rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t20_fail" ] || fail "T20 $t20_fail"
-ok "T20 套件根/mixio-app 对 mixly 可写（在线更新 stash 不再 EACCES），戳文件免重复 chmod"
+ok "T20 套件根对 mixly 可建目录/可改名、mixio-app 可写（更新不再 EACCES），戳文件免重复 chmod"
 
 echo "🎉 冒烟测试全部通过: $PASS/21"
