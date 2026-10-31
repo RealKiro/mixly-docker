@@ -107,7 +107,7 @@ bash test/smoke-test.sh ghcr.io/realkiro/mixly-server:v2.0
 ## 常见问题
 
 - **想用 `https://域名/admin` 访问管理后台**：设置环境变量 `MIXIO_ADMIN_BASE=/admin`，反向代理把 `^/admin(/.*)?$`（cloudflared 的 `path` 是 Go 正则）转发到 18084（自签证书需关闭上游校验，cloudflared 用 `noTLSVerify: true`）。入口脚本会在启动时剥掉前缀、注入 `<base href="/admin/">` 并把管理端模板的根路径改成相对路径，同时改写首页“管理后台”链接；不设置时保持官方原行为。详见 [README.md](README.md#管理后台走-admin)。
-- **`/admin` 里点“检查更新”立刻 404**（控制台报 `https://域名/api/download?url=…` 或 `/api/check-update` 404）：这两条是根路径，需要补丁相对化成 `api/download`、`api/check-update`（v2.4.3 起），v2.4.4 起还会在页面里注入运行时兜底脚本（改写 `fetch`/`XHR`/`EventSource` 的根路径 URL），不再依赖官方模板的具体写法。镜像/脚本是旧版时更新入口脚本后重启容器即可；更新完成后因官方包会覆盖 `mixio.js` 与 `ejs/`，入口脚本的观察者会在 5 秒内自动重打，日志出现 `检测到运行包被在线更新覆盖` 即代表已自愈。
+- **`/admin` 里点“检查更新”立刻 404**（控制台报 `https://域名/api/download?url=…` 或 `/api/check-update` 404）：这两条是根路径，需要补丁相对化成 `api/download`、`api/check-update`（v2.4.3 起），v2.4.4 起还会在页面里注入运行时兜底脚本（改写 `fetch`/`XHR`/`EventSource` 的根路径 URL），不再依赖官方模板的具体写法；注入锚点带回退链（`<meta charset=…>` → `</head>` → `<head>` → 文件末尾，日志以 `锚点: …` 标明落点），官方调整头部写法也不会静默落空。镜像/脚本是旧版时更新入口脚本后重启容器即可；更新完成后因官方包会覆盖 `mixio.js` 与 `ejs/`，入口脚本的观察者会在 5 秒内自动重打，日志出现 `检测到运行包被在线更新覆盖` 即代表已自愈。
 - **只有 https 能访问，http 8080 打不开**：MixSuite 设计如此（每次启动强制把 HTTP 端口置 0），请用 `https://<ip>:8443`。
 - **容器起来约几秒后 Mixly 界面才可用**：正常。NW 壳先起本地 HTTPS 服务，窗口就绪后才加载编辑器；`docker logs` 可看到启动过程。
 - **18084 端口冲突导致管理服务起不来**：容器内一般不会遇到；日志出现 `端口 18084 仍被占用` 时检查是否有同机其他 MixIO 实例。

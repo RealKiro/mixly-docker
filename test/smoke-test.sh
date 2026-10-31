@@ -823,4 +823,64 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t18_fail" ] || fail "T18 $t18_fail"
 ok "T18 MixMO 补丁插入、备份、重启幂等、缺 mixmo 仅告警"
 
-echo "🎉 冒烟测试全部通过: $PASS/19"
+echo "=== T19 /admin 前缀补丁：注入锚点回退（官方改头部写法也不静默失效）==="
+# 背景：<base> 与运行时兜底脚本原先只认字面 <meta charset="utf-8">，官方一改这行
+# （大写、加属性、换 http-equiv）就整段不注入 —— 页面照常打开、只有在线更新
+# /api/download 404，属于最难排查的静默故障。本用例用「没有 meta charset、只有
+# <head>/</head>」的模板锁定锚点回退链，并验证重跑幂等。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+mkdir -p "$tmp/mixio-app/ejs"
+printf '%s\n' '<html>' '<head>' '<title>admin</title>' '</head>' '<body></body>' '</html>' \
+    > "$tmp/mixio-app/ejs/admin.ejs"
+printf '%s\n' '<html>' '<head>' '<title>manage</title>' '</head>' \
+    '<body><script>var q = "/api/download?url=x";</script></body>' '</html>' \
+    > "$tmp/mixio-app/ejs/manage.ejs"
+t19_fail=""
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -e MIXIO_ADMIN_BASE=/admin \
+    -v "$tmp:/opt/mixly_server" "$IMAGE")
+wait_log "$cid" "stub MixlyServer running" 60 || t19_fail="桩未被 exec（补丁应先于启动完成）"
+if [ -z "$t19_fail" ]; then
+    log_has "$cid" "无 <meta charset>，<base> 改注入 </head> 前" \
+        || t19_fail="未见 <base> 锚点回退告警"
+    log_has "$cid" "已注入 <base href=\"/admin/\">（锚点: head_close）" \
+        || t19_fail="<base> 未按 head_close 锚点注入"
+    grep -q '<base href="/admin/">' "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
+        || t19_fail="manage.ejs 缺 <base>"
+    # <base> 必须落在 </head> 之前，否则浏览器不采用
+    awk '/<base href=/{b=NR} /<\/head>/{h=NR} END{exit !(b && h && b<h)}' \
+        "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
+        || t19_fail="<base> 不在 </head> 之前"
+    grep -q "MIXLY_DOCKER_ADMIN_URLFIX" "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
+        || t19_fail="manage.ejs 运行时兜底未注入"
+    grep -q "MIXLY_DOCKER_ADMIN_URLFIX" "$tmp/mixio-app/ejs/admin.ejs" 2>/dev/null \
+        || t19_fail="admin.ejs 运行时兜底未注入"
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+
+# 重跑：同一卷再启动一次 → 模板一字不变（锚点回退不得产生重复块）
+if [ -z "$t19_fail" ]; then
+    _md5_before=$(md5sum "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null | cut -d' ' -f1)
+    cid=$(docker run -d -e MIXLY_STRATEGY=2 -e MIXIO_ADMIN_BASE=/admin \
+        -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "stub MixlyServer running" 60 || t19_fail="第 2 次桩未被 exec"
+    if [ -z "$t19_fail" ]; then
+        _md5_after=$(md5sum "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null | cut -d' ' -f1)
+        [ "$_md5_before" = "$_md5_after" ] || t19_fail="重跑后模板被改动（幂等失效）"
+        [ "$(grep -c "MIXLY_DOCKER_ADMIN_URLFIX" "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null)" = "1" ] \
+            || t19_fail="运行时兜底出现重复块"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+
+if [ -n "$t19_fail" ]; then
+    echo "----- 容器日志（末 25 行）----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+    echo "----- manage.ejs 前 10 行 -----"
+    head -10 "$tmp/mixio-app/ejs/manage.ejs" 2>&1 || true
+fi
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t19_fail" ] || fail "T19 $t19_fail"
+ok "T19 <base>/兜底脚本按锚点回退注入，重跑幂等"
+
+echo "🎉 冒烟测试全部通过: $PASS/20"
