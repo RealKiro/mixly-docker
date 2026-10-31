@@ -669,6 +669,46 @@ if [ "$(id -u)" = "0" ]; then
     chown mixly:mixly "$APP_DIR" 2>/dev/null || true
     chmod a+rwX "$APP_DIR"
 
+    # ------------------------------------------------ 在线更新所需的写权限
+    # 管理端「检查更新 / 一键更新」以 mixly 身份执行，官方流程会：
+    #   * 在套件根建 .mixio-app-stash / .mixly-suite-stash 暂存 overlay；
+    #   * 把 mixly/ 整夹 rename 成 mixly.bak-update，再 rename 新目录就位；
+    #   * 就地覆盖 mixio-app/ 内的文件，并在备份夹里删旧文件。
+    # 官方包由宿主机解压/拷贝时属主是宿主机用户、目录 755、文件 644，以上每一步
+    # 都会 EACCES（实测：EACCES: permission denied, mkdir
+    # '/opt/mixly_server/.mixio-app-stash'），前端表现为「正在解压…」后直接失败。
+    #
+    # 这里只改权限位、不改属主：宿主机用户仍是属主，管理权限不受影响。
+    # 递归 chmod 只在需要时做一次（戳文件 + 探针），宿主机重新解压官方包后探针
+    # 失败会自动重跑；更新包落地后新文件属主是 mixly，后续启动无需再遍历。
+    _perm_stamp="$APP_DIR/runtime/.suite-perms-ok"
+    _perm_need=1
+    if [ -f "$_perm_stamp" ]; then
+        if gosu mixly:mixly sh -c "
+            set -e
+            mkdir '$SERVER_DIR/.perm-probe' && rmdir '$SERVER_DIR/.perm-probe'
+            : >> '$APP_DIR/mixio.js'
+            if [ -d '$SERVER_DIR/mixly' ]; then
+                : > '$SERVER_DIR/mixly/.perm-probe'
+                rm -f '$SERVER_DIR/mixly/.perm-probe'
+            fi
+        " 2>/dev/null; then
+            _perm_need=0
+        fi
+    fi
+    if [ "$_perm_need" = "1" ]; then
+        log "root: 修正套件写权限以支持在线更新（仅 chmod，不改属主）..."
+        chmod a+rwX "$SERVER_DIR" 2>/dev/null || true
+        chmod -R a+rwX "$SERVER_DIR" 2>/dev/null || true
+        if gosu mixly:mixly sh -c "mkdir '$SERVER_DIR/.perm-probe' && rmdir '$SERVER_DIR/.perm-probe'" 2>/dev/null; then
+            : > "$_perm_stamp" 2>/dev/null || true
+            chmod a+rw "$_perm_stamp" 2>/dev/null || true
+            log "root: 在线更新写权限已就绪（套件根与 mixio-app/ 对 mixly 可写）"
+        else
+            warn "root: 套件目录仍不可写（卷权限策略？），在线更新可能报 EACCES"
+        fi
+    fi
+
     # 自检：可写目录必须都存在。缺任何一个都直接报错退出，
     # 把问题暴露在启动阶段，而不是留到后面出现诡异症状。
     for _d in "$APP_DIR/storage" "$APP_DIR/logs" "$APP_DIR/config" \

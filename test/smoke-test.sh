@@ -883,4 +883,49 @@ rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t19_fail" ] || fail "T19 $t19_fail"
 ok "T19 <base>/兜底脚本按锚点回退注入，重跑幂等"
 
-echo "🎉 冒烟测试全部通过: $PASS/20"
+echo "=== T20 在线更新写权限（stash 目录 EACCES 回归）==="
+# 背景：官方更新流程以 mixly 身份在套件根建 .mixio-app-stash / .mixly-suite-stash、
+# 把 mixly/ rename 成备份、就地覆盖 mixio-app/ 内文件。宿主机解压的官方包属主是
+# 宿主机用户、目录 755、文件 644，容器内必然 EACCES（实测「正在解压…」后失败：
+# EACCES: permission denied, mkdir '/opt/mixly_server/.mixio-app-stash'）。
+# 入口脚本按需 chmod（不改属主），本用例锁定「mixly 能建 stash、能写 mixio-app
+# 内文件」，以及戳文件生效后不再重复递归 chmod。
+tmp=$(mktemp -d)
+make_pkg "$tmp" x86_64
+t20_fail=""
+cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
+wait_log "$cid" "stub MixlyServer running" 60 || t20_fail="桩未被 exec"
+if [ -z "$t20_fail" ]; then
+    log_has "$cid" "在线更新写权限已就绪" || t20_fail="未见写权限修正日志"
+    # 以 mixly 身份复刻官方更新流程的第一批写动作
+    docker exec "$cid" gosu mixly:mixly mkdir -p /opt/mixly_server/.mixio-app-stash \
+        || t20_fail="mixly 仍无法创建 .mixio-app-stash"
+    docker exec "$cid" gosu mixly:mixly mkdir -p /opt/mixly_server/.mixly-suite-stash \
+        || t20_fail="mixly 仍无法创建 .mixly-suite-stash"
+    docker exec "$cid" gosu mixly:mixly sh -c 'echo x >> /opt/mixly_server/mixio-app/mixio.js' \
+        || t20_fail="mixly 仍无法覆盖 mixio-app 内文件"
+    [ -d "$tmp/.mixio-app-stash" ] || t20_fail="宿主机看不到 stash 目录（写到了别处？）"
+fi
+docker rm -f "$cid" >/dev/null 2>&1 || true
+
+# 第二次启动：戳文件生效，不应再打印权限修正日志（避免每次启动递归遍历大目录）
+if [ -z "$t20_fail" ]; then
+    cid=$(docker run -d -e MIXLY_STRATEGY=2 -v "$tmp:/opt/mixly_server" "$IMAGE")
+    wait_log "$cid" "stub MixlyServer running" 60 || t20_fail="第 2 次桩未被 exec"
+    if [ -z "$t20_fail" ] && log_has "$cid" "修正套件写权限"; then
+        t20_fail="戳文件失效：每次启动都重新递归 chmod"
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+fi
+
+if [ -n "$t20_fail" ]; then
+    echo "----- 容器日志（末 25 行）----"
+    docker logs "$cid" 2>&1 | tail -25 || true
+    echo "----- 套件根权限 -----"
+    ls -ldn "$tmp" "$tmp/mixio-app" 2>&1 || true
+fi
+rm -rf "$tmp" 2>/dev/null || true
+[ -z "$t20_fail" ] || fail "T20 $t20_fail"
+ok "T20 套件根/mixio-app 对 mixly 可写（在线更新 stash 不再 EACCES），戳文件免重复 chmod"
+
+echo "🎉 冒烟测试全部通过: $PASS/21"
