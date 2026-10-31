@@ -855,6 +855,12 @@ if [ -z "$t19_fail" ]; then
         || t19_fail="manage.ejs 运行时兜底未注入"
     grep -q "MIXLY_DOCKER_ADMIN_URLFIX" "$tmp/mixio-app/ejs/admin.ejs" 2>/dev/null \
         || t19_fail="admin.ejs 运行时兜底未注入"
+    # Cloudflare RUM 探针（相对路径 cdn-cgi/rum）会被 <base> 改锚成 /admin/cdn-cgi/rum，
+    # 兜底脚本必须把它还原成根路径，否则控制台常驻一条 404。
+    grep -q "sendBeacon" "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
+        || t19_fail="运行时兜底未包 sendBeacon（CF RUM 上报会 404）"
+    grep -q "cdn-cgi/" "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
+        || t19_fail="运行时兜底缺 cdn-cgi 还原逻辑"
 fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
 

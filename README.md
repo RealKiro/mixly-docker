@@ -94,7 +94,9 @@ docker compose up -d
 > eventSource = new EventSource(q);        // ← 对 EventSource(...) 做替换永远命中不了
 > ```
 >
-> 所以除了改写 `'/api/download` 这类字符串常量，页面里还会注入一段脚本统一改写 `fetch` / `XMLHttpRequest` / `EventSource` 的根路径 URL，不依赖写法，官方以后新增接口也自动覆盖。已相对化的 URL 原样放行，`https://…`、`//cdn…` 不动。
+> 所以除了改写 `'/api/download` 这类字符串常量，页面里还会注入一段脚本统一改写 `fetch` / `XMLHttpRequest` / `EventSource` / `sendBeacon` 的根路径 URL，不依赖写法，官方以后新增接口也自动覆盖。已相对化的 URL 原样放行，`https://…`、`//cdn…` 不动。
+
+> **Cloudflare 的 RUM 探针也会被 `<base>` 带偏**：边缘会在回源 HTML 里插一段 `/cdn-cgi/rum` 上报脚本，它用的是**相对路径** `cdn-cgi/rum`——页面在 `/admin/` 下就会被解析成 `/admin/cdn-cgi/rum` 打到本服务，控制台报一条 `POST /admin/cdn-cgi/rum 404`。这条纯统计、不影响任何功能，但兜底脚本会把这些 `cdn-cgi/*` 请求还原成根路径（`/cdn-cgi/rum`），交回 Cloudflare 边缘处理，控制台即干净。
 >
 > 注入点也不写死：`<base>` 优先落在 `<meta charset=…>` 后（大小写、`http-equiv` 写法都认），找不到就退到 `</head>` 前 / `<head>` 后；兜底脚本同理，最后连 `<head>` 都没有时追加到文件末尾，并回读校验标记是否真的落盘。锚点全部落空会打 WARN 而不是静默跳过——静默跳过等于页面能开、只有在线更新 404，是最难排查的一类故障（官方调整模板头部写法后踩过，本版起加固）。
 
