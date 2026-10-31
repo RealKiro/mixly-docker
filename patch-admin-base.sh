@@ -201,6 +201,7 @@ fi
 # 一律以 <BASE>/ 为基准解析，页面停在 /admin（无尾斜杠）时也不会落到站点根。
 TPL="$APP_DIR/ejs"
 BASE_TAG="    <base href=\"${BASE}/\">"
+MK="    <!-- [MIXLY_DOCKER_ADMIN_BASE_PATCH] 反向代理前缀（MIXIO_ADMIN_BASE=${BASE}）：相对路径以该前缀为基准 -->"
 for _f in "$TPL/admin.ejs" "$TPL/manage.ejs"; do
     [ -f "$_f" ] || continue
     backup_once "$_f"
@@ -213,18 +214,39 @@ for _f in "$TPL/admin.ejs" "$TPL/manage.ejs"; do
         cat "$RT/ejs.patched" > "$_f" 2>/dev/null ||
             warn "更新 $(basename "$_f") 的 <base> 失败"
     else
-        awk -v tag="$BASE_TAG" -v base="$BASE" '
-            !done && /<meta charset="utf-8">/ {
-                print
-                print "    <!-- [MIXLY_DOCKER_ADMIN_BASE_PATCH] 反向代理前缀（BASE=" base "）：相对路径以该前缀为基准 -->"
-                print tag
-                done = 1
-                next
-            }
-            { print }
-        ' "$_f" > "$RT/ejs.patched" 2>/dev/null &&
-        cat "$RT/ejs.patched" > "$_f" 2>/dev/null ||
-            warn "注入 $(basename "$_f") 的 <base> 失败"
+        # 锚点链（防官方改版后静默失效）：<meta charset=…>（大小写/属性不限）
+        # → </head> 前 → <head…> 后。旧实现只认字面 <meta charset="utf-8">，
+        # 官方一改这行（大写、加属性、换 http-equiv）就整段不注入；此时页面
+        # 照常能打开、只有在线更新 404，是最难排查的静默故障。
+        ANCH=""
+        if grep -qiE '<meta[^>]*charset' "$_f" 2>/dev/null; then
+            ANCH=meta
+        elif grep -qi '</head' "$_f" 2>/dev/null; then
+            ANCH=head_close
+            warn "$(basename "$_f") 无 <meta charset>，<base> 改注入 </head> 前"
+        elif grep -qi '<head[[:space:]>]' "$_f" 2>/dev/null; then
+            ANCH=head_open
+            warn "$(basename "$_f") 无 <meta charset>/</head>，<base> 改注入 <head> 后"
+        else
+            warn "$(basename "$_f") 找不到 meta/head 锚点，跳过 <base>（运行时兜底仍会尝试）"
+        fi
+        if [ -n "$ANCH" ]; then
+            awk -v tag="$BASE_TAG" -v mk="$MK" -v mode="$ANCH" '
+                mode == "meta" && !ins && tolower($0) ~ /<meta[^>]*charset/ {
+                    print; print mk; print tag; ins = 1; next
+                }
+                mode == "head_close" && !ins && tolower($0) ~ /<\/head/ {
+                    print mk; print tag; ins = 1
+                }
+                mode == "head_open" && !ins && tolower($0) ~ /<head[[:space:]>]/ {
+                    print; print mk; print tag; ins = 1; next
+                }
+                { print }
+            ' "$_f" > "$RT/ejs.patched" 2>/dev/null &&
+            cat "$RT/ejs.patched" > "$_f" 2>/dev/null &&
+            log "$(basename "$_f") 已注入 <base href=\"${BASE}/\">（锚点: ${ANCH}）" ||
+                warn "注入 $(basename "$_f") 的 <base> 失败"
+        fi
     fi
     rm -f "$RT/ejs.patched" 2>/dev/null || true
 done
@@ -233,6 +255,10 @@ done
 # sed 只能命中已知写法；官方不同版本写法会变（反引号 / 单引号 / 双引号、字符串
 # 拼接），漏一条就是 404。这里往页面注入一段极小的脚本，统一改写
 # fetch / XHR / EventSource 的根路径 URL —— 不依赖模板写法，也不怕新增接口。
+#
+# 注入锚点同样有回退链：<base href=…> 之后（默认）→ </head> 前 → <head…> 后
+# → 文件末尾。这段脚本是「最后一道保险」，它没进去就等于在线更新必然 404，
+# 所以宁可追加到末尾也要注入，并逐个文件回读校验标记是否真的落盘。
 SNIP="$RT/admin-urlfix.snippet"
 {
     printf '    <script>/* [MIXLY_DOCKER_ADMIN_URLFIX] 根路径请求补前缀（BASE=%s） */\n' "$BASE"
@@ -241,22 +267,51 @@ SNIP="$RT/admin-urlfix.snippet"
 } > "$SNIP" 2>/dev/null
 for _f in "$TPL/admin.ejs" "$TPL/manage.ejs"; do
     [ -f "$_f" ] || continue
-    awk -v snip="$SNIP" '
+    [ -s "$SNIP" ] || { warn "运行时兜底片段为空，跳过 $(basename "$_f")"; break; }
+    SMODE=tail
+    if grep -qiE '<base[[:space:]]+href=' "$_f" 2>/dev/null; then
+        SMODE=base
+    elif grep -qi '</head' "$_f" 2>/dev/null; then
+        SMODE=head_close
+        warn "$(basename "$_f") 无 <base>，运行时兜底改注入 </head> 前"
+    elif grep -qi '<head[[:space:]>]' "$_f" 2>/dev/null; then
+        SMODE=head_open
+        warn "$(basename "$_f") 无 <base>/</head>，运行时兜底改注入 <head> 后"
+    else
+        warn "$(basename "$_f") 无 <base>/</head>/<head>，运行时兜底追加到文件末尾"
+    fi
+    awk -v snip="$SNIP" -v mode="$SMODE" '
         /MIXLY_DOCKER_ADMIN_URLFIX/ { drop = 1; next }
         drop && /<\/script>/ { drop = 0; next }
         drop { next }
-        /<base href=/ && !ins {
+        mode == "base" && !ins && tolower($0) ~ /<base[[:space:]]+href=/ {
             print
             while ((getline _l < snip) > 0) print _l
-            close(snip)
-            ins = 1
-            next
+            close(snip); ins = 1; next
+        }
+        mode == "head_close" && !ins && tolower($0) ~ /<\/head/ {
+            while ((getline _l < snip) > 0) print _l
+            close(snip); ins = 1
+        }
+        mode == "head_open" && !ins && tolower($0) ~ /<head[[:space:]>]/ {
+            print
+            while ((getline _l < snip) > 0) print _l
+            close(snip); ins = 1; next
         }
         { print }
+        END {
+            if (mode == "tail" && !ins) {
+                while ((getline _l < snip) > 0) print _l
+            }
+        }
     ' "$_f" > "$RT/ejs.patched" 2>/dev/null &&
-    cat "$RT/ejs.patched" > "$_f" 2>/dev/null &&
-    log "$(basename "$_f") 已注入运行时 URL 兜底（fetch/XHR/EventSource）" ||
-        warn "注入 $(basename "$_f") 的运行时兜底失败"
+    cat "$RT/ejs.patched" > "$_f" 2>/dev/null
+    # 回读校验：标记必须真的落在文件里，否则告警（静默失败 = 在线更新必然 404）
+    if grep -q "MIXLY_DOCKER_ADMIN_URLFIX" "$_f" 2>/dev/null; then
+        log "$(basename "$_f") 已注入运行时 URL 兜底（fetch/XHR/EventSource，锚点: ${SMODE}）"
+    else
+        warn "注入 $(basename "$_f") 的运行时兜底失败（页面将回落到逐条 sed，可能仍 404）"
+    fi
     rm -f "$RT/ejs.patched" 2>/dev/null || true
 done
 rm -f "$SNIP" 2>/dev/null || true

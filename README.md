@@ -95,6 +95,8 @@ docker compose up -d
 > ```
 >
 > 所以除了改写 `'/api/download` 这类字符串常量，页面里还会注入一段脚本统一改写 `fetch` / `XMLHttpRequest` / `EventSource` 的根路径 URL，不依赖写法，官方以后新增接口也自动覆盖。已相对化的 URL 原样放行，`https://…`、`//cdn…` 不动。
+>
+> 注入点也不写死：`<base>` 优先落在 `<meta charset=…>` 后（大小写、`http-equiv` 写法都认），找不到就退到 `</head>` 前 / `<head>` 后；兜底脚本同理，最后连 `<head>` 都没有时追加到文件末尾，并回读校验标记是否真的落盘。锚点全部落空会打 WARN 而不是静默跳过——静默跳过等于页面能开、只有在线更新 404，是最难排查的一类故障（官方调整模板头部写法后踩过，本版起加固）。
 
 > **在线更新**（面板里的“检查更新 / 一键更新”）调的是 `POST /api/check-update` 和 `GET /api/download`（EventSource 推 SSE 进度），两个都是根路径，不处理就会 404。另外更新包会把 `mixio.js`、`ejs/`、`js/` 整包替换、补丁标记丢失，而更新只重启 node 进程、不重启容器——入口脚本因此挂了个 5 秒轮询的观察者，检测到标记丢失就自动重打（日志：`检测到运行包被在线更新覆盖`）。模板是 `ejs.renderFile` 每次读盘，改完立即生效；`mixio.js` 要进程重启才生效，更新流程本身会重启进程，通常正好接上。万一更新后 `/admin` 仍 404，`docker compose restart mixly` 一次即可。
 
