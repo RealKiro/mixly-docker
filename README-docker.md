@@ -61,7 +61,7 @@ MixSuite-linux-x64/
 
 启动成功后浏览器访问：
 
-- `https://NAS_IP:8443` —— MixIO/Mixly 主界面（首页可进 Mixly / MixCO / MixMO / MixNT；自签证书点"高级 → 继续访问"）
+- `https://NAS_IP:8443` —— MixIO/Mixly 主界面（首页可进 Mixly / MixCO / MixMO / MixNT；自签证书点"高级 → 继续访问"，或按 [README「自建 CA」](README.md#ip-直连时消除证书警告自建-ca) 换带 IP SAN 的证书）
 - `https://NAS_IP:8443/mixmo` —— MixMO 手机 App 设计（需运行包含 `mixmo/` 的新版官方包，v2.3.0 起自动启用）
 - `https://NAS_IP:18084` —— 管理模式（数据管理、用户导入、手动更新 Mixly/MixIO）
 

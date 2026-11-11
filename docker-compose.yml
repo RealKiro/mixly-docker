@@ -4,7 +4,8 @@
 #
 # Mixly 4.0 起官方唯一发行版 = MixSuite（内置 MixIO 的 MixlyServer，NW.js 应用）：
 #   * 强制 HTTPS：HTTP(8080) 被官方固定关闭，请用 https://NAS_IP:8443 访问
-#     （运行包自带自签证书，浏览器提示"连接不是专用连接"时点 高级→继续访问）
+#     （运行包自带自签证书，浏览器提示"连接不是专用连接"时点 高级→继续访问；
+#      想彻底消除警告见 README「IP 直连时消除证书警告（自建 CA）」）
 #   * 数据在映射目录的 mixio-app/ 下：storage(SQLite) / logs / config
 #   * 管理员默认 admin/public，在 mixio-app/config/config.json 中修改
 #

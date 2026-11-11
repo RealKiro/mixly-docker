@@ -59,7 +59,7 @@ docker compose up -d
 
 | 入口 | 地址 | 说明 |
 |---|---|---|
-| MixIO / Mixly 主界面 | `https://NAS_IP:8443` | 强制 HTTPS；自签证书提示"连接不是专用连接"时点**高级 → 继续访问** |
+| MixIO / Mixly 主界面 | `https://NAS_IP:8443` | 强制 HTTPS；自签证书提示"连接不是专用连接"时点**高级 → 继续访问**，或按[自建 CA](#ip-直连时消除证书警告自建-ca)彻底消除 |
 | 管理模式 | `https://NAS_IP:18084` | 数据管理、用户导入、在线更新；也可经反代走 `https://域名/admin` |
 | MixMO（手机 App 设计） | `https://NAS_IP:8443/mixmo` | 需套件内有 `mixmo/`（官方 2026-10-15 包内置） |
 | MQTT | `NAS_IP:1883` | 设备接入 |
@@ -293,11 +293,72 @@ GHCR_USER=你的GitHub用户名 ./build-push.sh v2.0
 
 ---
 
+## IP 直连时消除证书警告（自建 CA）
+
+官方运行包自带的证书在 `mixio-app/config/certs/`（`file.crt` + `private.pem`，由 `config.json` 的 `HTTPS_CRT_FILE` / `HTTPS_PRIVATE_PEM` 指向）。它必然导致 `https://<IP>:8443` 告警，原因有三个：
+
+- 签发者是 `CHINASSL Certification Authority`，不在任何操作系统/浏览器的信任库里；
+- SAN 只有 `localhost / www.test.com / 192.168.0.1 / 127.0.0.1`，**不含你的 NAS IP**；
+- 该证书 2025-09-29 已过期。
+
+点「高级 → 继续访问」只是临时绕过，每台设备都要点一次，手机 App 等内嵌 WebView 通常直接拒绝连接。要「正常访问」（地址栏小锁、无警告），两件事缺一不可：
+
+1. **服务端换成带 IP SAN 的证书**——IP 必须写进 SAN 的 `IP Address` 条目，CN 写 IP 现代浏览器一律不认；
+2. **把签发它的 CA 导入每台客户端的「受信任的根证书颁发机构」**——只换服务端证书、不装 CA 没用。
+
+> 走域名（Cloudflare / 反代）时不需要这一步：域名证书由公共 CA 签发，源站勾 `No TLS Verify` 即可。本节只解决**用 IP 直连**。
+> 代价：这个 CA 能签发任意域名的证书，`mixio-ca.key` 必须保管好；没导入 CA 的设备仍会告警（访客设备只能继续「继续访问」或改用域名）。
+
+### 1) 生成并应用
+
+仓库脚本 [`gen-ip-cert.sh`](gen-ip-cert.sh)（只需 `openssl`，Windows Git Bash / Linux / 群晖 SSH 均可）：
+
+```bash
+./gen-ip-cert.sh /docker/mixly/mixly_server --apply --days 365 \
+    192.168.1.10 --dns mixly.example.com admin.example.com
+```
+
+- 第一个参数是套件根目录（compose 里挂到 `/opt/mixly_server` 的目录，下有 `mixio-app/`）；
+- 后面可列多个 IP / 域名，全部写进 SAN；`127.0.0.1`、`localhost` 自动包含；
+- `--apply` 会**按原文件名**就地替换 `config/certs/` 里的证书与私钥（不改 `config.json`），原文件备份为 `*.mixly-orig`；不加则只生成到 `mixly-certs/`，自己拷贝。合并式 PEM（单文件同时含证书与私钥）也能正确处理。
+
+生成物在 `<套件根>/mixly-certs/`：
+
+| 文件 | 用途 |
+|---|---|
+| `mixio-ca.crt` | **分发给每台客户端**，导入根证书库 |
+| `mixio-ca.key` | CA 私钥，勿分发、勿上传 |
+| `mixio-server.crt` / `.key` | 服务端证书与私钥（`--apply` 已写入 `config/certs/`） |
+
+服务端有效期 365 天，到期重跑同一条命令即可：已有 CA 会复用，客户端**不用重新导入**。官方「在线更新」可能覆盖 `certs/`，更新后若又告警，重跑一次 `--apply` 并重启容器即可。
+
+### 2) 客户端导入 CA
+
+| 客户端 | 操作 |
+|---|---|
+| Windows（Chrome/Edge） | 双击 `mixio-ca.crt` → 安装证书 → **本地计算机** → **受信任的根证书颁发机构**；或管理员 CMD `certutil -addstore -f "ROOT" mixio-ca.crt`。装完重启浏览器 |
+| macOS | 双击导入「系统」钥匙串 → 设为「始终信任」；或 `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain mixio-ca.crt` |
+| Android | 把 `mixio-ca.crt` 传到手机 → 设置 → 安全 → 加密与凭据 → 从存储设备安装 → **CA 证书** |
+| iOS | Safari 下载 `mixio-ca.crt` → 安装描述文件 → 设置 → 通用 → 关于本机 → **证书信任设置** → 开启完全信任 |
+| Firefox | 独立证书库：设置 → 隐私与安全 → 查看证书 → 证书颁发机构 → 导入；或 `about:config` 设 `security.enterprise_roots.enabled=true` |
+
+### 3) 重启并验证
+
+```bash
+docker restart mixly-server
+openssl s_client -connect 192.168.1.10:8443 </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -ext subjectAltName
+```
+
+`issuer` 应为 `CN = Mixly Local CA`，SAN 里要有 `IP Address:192.168.1.10`。浏览器打开 `https://192.168.1.10:8443` 应直接显示小锁。仍告警时依次检查：访问的 IP 是否在 SAN 里（换 IP 要重签）、CA 是否装在**根**证书存储而非「个人」、浏览器是否重启、容器是否真的重启了。
+
+---
+
 ## 常见问题（FAQ）
 
 **Q1：浏览器提示"连接不是专用连接 / 不安全"**
 
-MixSuite 强制 HTTPS 且使用自签证书，属正常现象：点**高级 → 继续访问**即可。内网也可在 DSM/路由器做端口映射或反向代理套正式证书。
+官方自带证书不受信任、SAN 不含你的 IP 且已过期，属正常现象：点**高级 → 继续访问**可临时绕过。想彻底消除警告见 [IP 直连时消除证书警告（自建 CA）](#ip-直连时消除证书警告自建-ca)；内网也可在 DSM/路由器做反向代理套正式证书。
 
 **Q2：容器起来就退出，日志提示"未检测到 Mixly 官方运行包"**
 
