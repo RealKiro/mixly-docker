@@ -999,23 +999,40 @@ rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}"
 # 而降权后的 mixly 用户是另一个 uid。无 -ac 时能否连上取决于 X 服务器的
 # host-based 控制实现，加上它彻底消除这个变量（-nolisten tcp 保证不开 TCP 端口，
 # 只听 unix socket，安全性不受影响）。
-Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp -ac &
-XVFB_PID=$!
+# 瘦身后镜像不含 Mesa 软件渲染栈（libGLX_mesa / libgallium / libLLVM / libz3）：
+# 显式禁用 GLX 扩展，Xvfb 就不会去加载已删除的 GLX vendor；NW.js 传
+# --disable-gpu 且自带 SwiftShader，本就不需要服务端 3D 渲染。
+# 若某基础镜像的 Xvfb 不接受 -extension GLX，自动退回原参数重试（兼容兜底）。
+_xvfb_start() {
+    if [ "$1" = "no-glx" ]; then
+        Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp -ac -extension GLX &
+    else
+        Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp -ac &
+    fi
+    XVFB_PID=$!
+    _waited=0
+    while [ ! -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
+        if ! kill -0 "$XVFB_PID" 2>/dev/null; then return 1; fi
+        if [ "$_waited" -ge 15 ]; then return 1; fi
+        sleep 1 || true
+        _waited=$((_waited + 1))
+    done
+    return 0
+}
 
-_waited=0
-while [ ! -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; do
-    kill -0 "$XVFB_PID" 2>/dev/null || {
+if _xvfb_start no-glx; then
+    log "Xvfb 虚拟显示已就绪: $DISPLAY（GLX 已禁用）"
+else
+    log "警告: 禁用 GLX 的 Xvfb 未就绪，回退到默认参数重试"
+    kill "$XVFB_PID" 2>/dev/null || true
+    wait "$XVFB_PID" 2>/dev/null || true
+    rm -f "/tmp/.X${DISPLAY_NUM}-lock" "/tmp/.X11-unix/X${DISPLAY_NUM}" || true
+    if ! _xvfb_start default; then
         echo "[entrypoint][ERROR] Xvfb 启动失败（虚拟显示不可用）。" >&2
         exit 1
-    }
-    [ "$_waited" -ge 15 ] && {
-        echo "[entrypoint][ERROR] Xvfb 就绪超时（15s）。" >&2
-        exit 1
-    }
-    sleep 1
-    _waited=$((_waited + 1))
-done
-log "Xvfb 虚拟显示已就绪: $DISPLAY"
+    fi
+    log "Xvfb 虚拟显示已就绪: $DISPLAY（兼容模式）"
+fi
 
 # Xvfb 存活监控：Xvfb 若在 MixlyServer 运行期间死亡，DISPLAY 会失效、
 # Chromium 窗口被销毁、NW.js 随即以退出码 0 结束（所有窗口关闭即退出）。

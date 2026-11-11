@@ -37,11 +37,11 @@ LABEL org.opencontainers.image.title="mixly-server-runtime" \
       org.opencontainers.image.source="https://mixly.cn"
 
 # NW.js(Chromium) 运行时依赖（Debian 官方源）：
-#   GTK3 / NSS / X11 / ALSA / fontconfig / Mesa(GBM,Drm) 等；
-#   Xvfb 虚拟显示；gosu 降权；tini 信号转发；文泉驿中文字体（GUI 壳中文渲染，
-#   可换字体noto-cjk：fonts-noto-cjk）。
+#   GTK3 / NSS / X11 / ALSA / fontconfig / GBM 等；Xvfb 虚拟显示；
+#   gosu 降权；tini 信号转发；curl/ps/net-tools 供健康检查与启动取证。
 #   x11-utils 提供 xdpyinfo：NW.js 窗口创建失败时，X 服务器的 visual/扩展
 #   是最常见的环境根因，入口脚本的自动取证会调用它（见 docker-entrypoint.sh）。
+#   不装中文字体：GUI 壳只在容器内虚拟显示上作运维兜底，页面由客户端渲染。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         xvfb x11-utils \
@@ -53,12 +53,34 @@ RUN apt-get update \
         libx11-6 libx11-xcb1 libxau6 libxcb1 libxcomposite1 libxcursor1 \
         libxdamage1 libxdmcp6 libxext6 libxfixes3 libxi6 libxrandr2 \
         libxrender1 libxss1 libxtst6 libxkbcommon0 \
-        fonts-wqy-zenhei \
         ca-certificates tzdata tini gosu \
         curl procps net-tools \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r mixly \
-    && useradd -r -g mixly -d /opt/mixly_server -s /usr/sbin/nologin mixly
+    && useradd -r -g mixly -d /opt/mixly_server -s /usr/sbin/nologin mixly \
+    # --- 体积瘦身：删除用不到的 Mesa 软件 3D 渲染栈 ---
+    # 实测 libnw.so 硬链接 libgbm.so.1，但 libgbm.so.1 的 DT_NEEDED 只有
+    # libdrm/libexpat/libm/libc 四个小库，并不链接 mesa-libgallium。
+    # 真正拉入 libgallium → libLLVM → libz3（约 190MiB）的是 Xvfb 的 GLX
+    # 扩展 libGLX_mesa 与 DRI 驱动；入口脚本以 -extension GLX 启动 Xvfb，
+    # NW.js 又传 --disable-gpu 且自带 SwiftShader，这套软件 3D 栈用不上。
+    # glob 覆盖 amd64 / arm64 / loong64 三种 multiarch 路径。
+    && { _gbm_found=0; \
+         for d in /usr/lib/*-linux-gnu /usr/lib/*-linux-gnueabihf; do \
+             [ -d "$d" ] || continue; \
+             rm -f "$d"/libLLVM*.so* "$d"/libgallium*.so* "$d"/libz3.so* \
+                   "$d"/libGLX_mesa.so* "$d"/libEGL_mesa.so* \
+                   "$d"/libvulkan_lvp.so*; \
+             rm -rf "$d"/dri "$d"/systemd; \
+             if ls "$d"/libgbm.so.1* >/dev/null 2>&1; then _gbm_found=1; fi; \
+         done; \
+         [ "$_gbm_found" -eq 1 ] || { \
+             echo "ERROR: libgbm.so.1 缺失，NW.js 将无法加载，终止构建" >&2; exit 1; }; } \
+    # adwaita-icon-theme / shared-mime-info 是 libgtk-3 的硬依赖，systemd 由
+    # dbus-user-session 拉入；purge 会连带卸 GTK，只删数据文件保持 dpkg 自洽。
+    # mime 与 gtk-3.0 schema 保留，避免影响 GTK/GIO 初始化。
+    && rm -rf /usr/share/icons/Adwaita /usr/share/doc /usr/share/man \
+              /usr/share/info /usr/lib/systemd /usr/bin/systemctl /var/cache/apt
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

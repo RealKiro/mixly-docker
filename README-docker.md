@@ -40,13 +40,15 @@ MixSuite-linux-x64/
 - amd64 / arm64：Docker Hub 官方 `debian:trixie-slim`
 - loong64：Docker Hub 官方 debian 无 loong64 变体，用社区同步镜像 `ghcr.io/loong64/debian:trixie-slim`（与官方同源构建），按架构分别构建后用 manifest 合并。
 
-镜像约 300MB（NW.js 运行时依赖 + Xvfb + 中文字体），运行包本身仍由使用者挂载提供。
+镜像压缩后约 **60 MiB**、解压后约 **165 MiB**（amd64 实测；v2.4.10 及之前为 140.6 MiB / 396 MiB）。运行包本身仍由使用者挂载提供。
+
+体积主要来自 NW.js 的 GTK3/NSS/X11 依赖与 Xvfb。其中 Mesa 软件 3D 渲染栈（`libLLVM` / `libgallium` / `libz3` / `libGLX_mesa` / DRI 驱动，解压约 190 MiB）只在 Xvfb 的 GLX 扩展下才用得到，已裁剪：入口脚本以 `-extension GLX` 启动 Xvfb，NW.js 传 `--disable-gpu` 且自带 SwiftShader。`libgbm.so.1` 是 `libnw.so` 的硬依赖，必须保留（实测其 DT_NEEDED 只有 `libdrm`/`libexpat`/`libm`/`libc`，并不链接 libgallium，所以删大库不影响加载）。中文字体未安装：GUI 壳仅作容器内运维兜底，页面由客户端渲染。
 
 ## 文件说明
 
 | 文件 | 用途 |
 |---|---|
-| `Dockerfile` | `debian:trixie-slim`（loong64 用 `ghcr.io/loong64/debian:trixie-slim`）+ NW.js/X11 依赖 + Xvfb + gosu + tini 的运行环境镜像（约 300MB，amd64+arm64+loong64 三架构） |
+| `Dockerfile` | `debian:trixie-slim`（loong64 用 `ghcr.io/loong64/debian:trixie-slim`）+ NW.js/X11 依赖 + Xvfb + gosu + tini 的运行环境镜像（压缩约 60 MiB / 解压约 165 MiB，amd64+arm64+loong64 三架构） |
 | `docker-entrypoint.sh` | 启动前定位 MixSuite 包、校验 `.host/nw` ELF 架构、预建并 chown `mixio-app` 数据目录、起 Xvfb 虚拟显示、gosu 降权后 `exec MixlyServer`（前台运行） |
 | `docker-compose.yml` | 群晖 Container Manager 可直接导入，含端口（8443/18084/1883/8083/8084/8082/8086）、挂载、串口透传示例 |
 | `build-push.sh` | 本地 buildx 构建并同时推送 GHCR + Docker Hub |

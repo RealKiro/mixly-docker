@@ -97,6 +97,9 @@ if [ -z "$t2_fail" ]; then
     # 是同一条 pipefail+SIGPIPE 链路（echo 量小时不易触发，但仍是隐患）
     log_has "$cid" "运行包架构校验通过" || t2_fail="架构校验未通过"
     log_has "$cid" "Xvfb 虚拟显示已就绪" || t2_fail="Xvfb 未就绪"
+    # 瘦身后 Mesa 软件渲染栈已删，Xvfb 必须以 -extension GLX 启动。
+    # 若落到「兼容模式」，说明该参数不被接受，CI 应直接暴露而不是带到用户现场。
+    log_has "$cid" "GLX 已禁用" || t2_fail="Xvfb 未禁用 GLX（参数或回退逻辑有问题）"
     # CI 的 /dev/shm 是 Docker 默认 64MB，正好覆盖"共享内存不足"这条告警路径：
     # 该检测缺失会导致 NW.js 在用户机器上静默重启而无任何提示。
     log_has "$cid" "/dev/shm 仅" \
@@ -144,6 +147,34 @@ docker rm -f "$cid" >/dev/null 2>&1 || true
 rm -rf "$tmp" 2>/dev/null || true
 [ -z "$t2_fail" ] || fail "T2 $t2_fail"
 ok "T2 校验/chmod/chown/Xvfb/exec 全链路通过（数据目录 uid=$uid，非 root）"
+
+echo "=== T2c 瘦身校验（Mesa 软件渲染栈已裁剪、libgbm 依赖完整）==="
+if ! docker run --rm --entrypoint sh "$IMAGE" -c '
+    for d in /usr/lib/*-linux-gnu; do
+        [ -d "$d" ] || continue
+        if ls "$d"/libLLVM*.so* "$d"/libgallium*.so* "$d"/libz3.so* \
+              "$d"/libGLX_mesa.so* "$d"/dri/swrast_dri.so >/dev/null 2>&1; then
+            echo "残留 Mesa 软件渲染库: $d"
+            exit 1
+        fi
+    done
+    _found=0
+    for d in /usr/lib/*-linux-gnu; do
+        [ -d "$d" ] || continue
+        if [ -e "$d/libgbm.so.1" ]; then
+            _found=1
+            if ldd "$d/libgbm.so.1" 2>/dev/null | grep -q "not found"; then
+                echo "libgbm.so.1 动态依赖缺失: $d"
+                exit 1
+            fi
+        fi
+    done
+    [ "$_found" -eq 1 ] || { echo "libgbm.so.1 缺失，NW.js 无法加载"; exit 1; }
+    exit 0
+' >/dev/null 2>&1; then
+    fail "T2c Mesa 软件渲染栈未清除或 libgbm.so.1 依赖不完整"
+fi
+ok "T2c Mesa 软件渲染栈已裁剪，libgbm.so.1 及其动态依赖完整"
 
 echo "=== T2b chown 无效场景的 chmod 兜底（Docker Desktop/NFS 卷语义）==="
 # Docker Desktop(WSL2/virtiofs)、NFS/CIFS 卷上 chown 静默无效（属主永远 root），
