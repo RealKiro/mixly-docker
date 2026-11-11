@@ -80,7 +80,7 @@ docker login                  # Docker Hub
 GHCR_USER=RealKiro DOCKERHUB_USER=你的DockerHub用户名 ./build-push.sh v2.0
 ```
 
-镜像约 300MB，输出 `linux/amd64` + `linux/arm64` + `linux/loong64` 三架构 manifest，x64 / ARM / 龙芯设备均可拉取。
+镜像压缩后约 60 MiB / 解压约 165 MiB，输出 `linux/amd64` + `linux/arm64` + `linux/loong64` 三架构 manifest，x64 / ARM / 龙芯设备均可拉取。
 
 ## 架构说明
 

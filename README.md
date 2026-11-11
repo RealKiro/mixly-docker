@@ -4,7 +4,7 @@
 
 适配 [Mixly 米思齐](https://mixly.cn) **Mixly 4.0（MixSuite）** 离线服务端的 Docker 运行环境，支持群晖 NAS 等 **x64 / arm64 / loong64** 设备。
 
-**镜像只含运行环境（约 300MB，Debian + NW.js/X11 依赖 + Xvfb 虚拟显示），不含官方运行包。** 需自行从官方百度网盘下载对应架构的 `MixSuite-linux-<架构>.zip`，解压后放进映射目录。
+**镜像只含运行环境（压缩约 60 MiB / 解压约 165 MiB，Debian + NW.js/X11 依赖 + Xvfb 虚拟显示），不含官方运行包。** 需自行从官方百度网盘下载对应架构的 `MixSuite-linux-<架构>.zip`，解压后放进映射目录。
 
 > Mixly 4.0 起官方只有一个发行版：内置 MixIO 的 **MixSuite**（NW.js 应用），替代旧版 `mixly_server`（`mixio` 单文件）。**强制 HTTPS**：HTTP(8080) 被官方固定关闭，请用 `https://NAS_IP:8443`。从 v1.x 升级见[迁移说明](#从-v1xmixly_server-迁移)。
 >

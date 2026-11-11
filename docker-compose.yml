@@ -1,5 +1,5 @@
 # Mixly 4.0（MixSuite）离线服务端 - 群晖 NAS Docker Compose 部署
-# 镜像只含运行环境（Debian + NW.js/X11 依赖 + Xvfb，约 300MB）；
+# 镜像只含运行环境（Debian + NW.js/X11 依赖 + Xvfb，压缩约 60 MiB / 解压约 165 MiB）；
 # 官方 MixSuite 运行包需按机器架构下载解压后放入下方映射的 mixly_server 目录。
 #
 # Mixly 4.0 起官方唯一发行版 = MixSuite（内置 MixIO 的 MixlyServer，NW.js 应用）：
