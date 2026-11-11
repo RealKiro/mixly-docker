@@ -1242,22 +1242,61 @@ fi
 mkdir -p "$APP_DIR/logs"
 # 只在前台身份启动转发：root 分支会 gosu 重跑本脚本，若不加此判断会起两个 tail，
 # 同一份日志被重复输出两遍。
+#
+# 防「历史日志回灌」：官方在线更新会整包替换 mixio-app/，logs/*.log 的 inode
+# 随之变化。原先的 tail -n 0 -F 在文件被替换后会重新打开并「从头」输出整个
+# 文件，实测一次把 10 天共 9 万行历史心跳全吐进 docker logs（导出日志 28MB），
+# 还把管道打到 sed: couldn't flush stdout: Resource temporarily unavailable。
+# 现在改为：tail -n 0 -f 按 fd 跟随（只跟新内容，绝不重放），由看门狗检测
+# inode / 文件列表变化，变化即让 tail 退出并重新以 -n 0 挂到新文件上。
 if [ "$(id -u)" != "0" ]; then
-    if ls "$APP_DIR/logs"/*.log >/dev/null 2>&1; then
-        ( tail -n 0 -F "$APP_DIR/logs"/*.log 2>/dev/null \
-            | sed -u 's/^/[mixio] /' ) &
-    else
-        ( # 日志文件稍后才创建：等它出现再开始跟随
-          _waited_log=0
-          while [ "$_waited_log" -lt 120 ]; do
-              sleep 1
-              ls "$APP_DIR/logs"/*.log >/dev/null 2>&1 && break
-              _waited_log=$((_waited_log + 1))
-          done
-          ls "$APP_DIR/logs"/*.log >/dev/null 2>&1 && \
-            tail -n 0 -F "$APP_DIR/logs"/*.log 2>/dev/null | sed -u 's/^/[mixio] /' ) &
-    fi
-    log "已启用 MixIO 日志转发（日志行前缀 [mixio]，日志文件出现后即自动跟随）"
+    (
+        _log_sig() {
+            # 只比文件名 + inode：日志正常写入会改变大小，不能把 size 算进来，
+            # 否则看门狗每隔几秒就误判一次、反复重挂导致丢行。
+            for _lf in "$APP_DIR/logs"/*.log; do
+                [ -f "$_lf" ] || continue
+                printf '%s:%s\n' "$_lf" \
+                    "$(stat -c '%i' "$_lf" 2>/dev/null || echo 0)"
+            done
+        }
+        # 注意：本脚本 set -e，后台子 shell 会继承。下面所有可能被中断的
+        # 命令都要显式兜底，避免一次 sleep 失败就让整个转发循环永久停摆。
+        _waited_log=0
+        while :; do
+            set -- "$APP_DIR/logs"/*.log
+            [ -f "$1" ] || set --
+            if [ "$#" -eq 0 ]; then
+                # 日志文件稍后才创建：等它出现再开始跟随（最多 120 秒）
+                _waited_log=$((_waited_log + 1))
+                if [ "$_waited_log" -gt 120 ]; then break; fi
+                sleep 1 || true
+                continue
+            fi
+            _sig=$(_log_sig)
+
+            # 看门狗：日志被替换/轮转/删除/新增时退出，tail --pid 随之结束。
+            # sleep 2 同时兼作节流：万一某基础镜像的 tail 不支持 --pid 立刻
+            # 报错退出，也不会形成每毫秒重启一次的忙循环。
+            (
+                while :; do
+                    sleep 2 || true
+                    [ "$(_log_sig)" = "$_sig" ] || exit 0
+                done
+            ) &
+            _wd=$!
+
+            # -f 按 fd 跟随 + -n 0 从当前末尾起：即便新文件里带着十天历史，
+            # 也只转发后续新行；-q 抑制多文件时的 ==> file <== 头；
+            # -s 1 保证无新日志写入时仍每秒检查一次 --pid。
+            tail -q -n 0 -f -s 1 --pid="$_wd" "$@" 2>/dev/null \
+                | sed -u 's/^/[mixio] /' || true
+            kill "$_wd" 2>/dev/null || true
+            wait "$_wd" 2>/dev/null || true
+            sleep 1 || true
+        done
+    ) &
+    log "已启用 MixIO 日志转发（日志行前缀 [mixio]，日志被替换时只跟新内容）"
 
     # ---- 捕获 nw-main-error.log：mixio.js 加载失败的唯一落盘证据 ----
     # nw-main.js 在 require('./mixio.js') 抛错时，会把完整 stack 写入
