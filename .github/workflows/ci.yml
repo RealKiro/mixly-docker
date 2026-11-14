@@ -199,3 +199,23 @@ jobs:
               --amend "${{ env.DH_USERNAME }}/mixly-server:${TAG}-loong64"
             docker manifest push "${{ env.DH_USERNAME }}/mixly-server:${TAG}"
           done
+
+      - name: 输出镜像地址与 compose 用法
+        # GHCR_IMAGE 由本 job 的「镜像名转小写」写入 GITHUB_ENV；
+        # Fork 后 GITHUB_REPOSITORY_OWNER 就是 Fork 者，镜像自然落在他自己的命名空间。
+        run: |
+          {
+            echo "### 构建完成"
+            echo ""
+            echo "镜像已推送到你自己的命名空间：\`${GHCR_IMAGE}:latest\`"
+            echo ""
+            echo "在 \`docker-compose.yml\` 同目录建 \`.env\`（可直接复制 \`.env.example\`），写入："
+            echo '```ini'
+            echo "MIXLY_IMAGE=${GHCR_IMAGE}:latest"
+            echo '```'
+            echo ""
+            echo "然后执行 \`docker compose pull && docker compose up -d\`。也可不改文件，临时指定："
+            echo "\`MIXLY_IMAGE=${GHCR_IMAGE}:latest docker compose up -d\`"
+            echo ""
+            echo "> 首次使用请把 Package 设为 Public（Package settings → Change visibility），否则 NAS 拉取前需先 \`docker login ghcr.io\`。"
+          } >> "$GITHUB_STEP_SUMMARY"

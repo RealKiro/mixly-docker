@@ -290,26 +290,41 @@ for _f in "$TPL/admin.ejs" "$TPL/manage.ejs"; do
     rm -f "$RT/ejs.patched" 2>/dev/null || true
 done
 
-# ---------------------------------------- 2b) 运行时兜底：根路径请求补前缀
+# -------------------------------- 2b) 运行时兜底：根路径补前缀 + 响应诊断
 # sed 只能命中已知写法；官方不同版本写法会变（反引号 / 单引号 / 双引号、字符串
-# 拼接），漏一条就是 404。这里往页面注入一段极小的脚本，统一改写
-# fetch / XHR / EventSource 的根路径 URL —— 不依赖模板写法，也不怕新增接口。
+# 拼接 / location.origin 拼接），漏一条就是请求打到站点根。这里注入一段脚本，
+# 统一改写 fetch / XHR / EventSource / sendBeacon 的 URL，不依赖模板写法。
+#
+# 2026.11 起多一层「响应诊断」：更新接口期待 JSON，但反代 404 页、登录会话
+# 过期后的重定向、Express 默认 404 页都会返回 <!DOCTYPE html>，前端 .json()
+# 只抛 "Unexpected token '<'"，看不出是哪条 URL 挂了。这里在 content-type 为
+# text/html 时把 URL / 状态码 / 响应开头打到控制台，并把 /api/ 请求换成可读
+# 的中文错误，页面直接显示原因。
 #
 # 注入锚点同样有回退链：<base href=…> 之后（默认）→ </head> 前 → <head…> 后
-# → 文件末尾。这段脚本是「最后一道保险」，它没进去就等于在线更新必然 404，
+# → 文件末尾。这段脚本是「最后一道保险」，它没进去就等于在线更新必然出错，
 # 所以宁可追加到末尾也要注入，并逐个文件回读校验标记是否真的落盘。
 SNIP="$RT/admin-urlfix.snippet"
 {
-    printf '    <script>/* [MIXLY_DOCKER_ADMIN_URLFIX] 根路径请求补前缀（BASE=%s） */\n' "$BASE"
-    # cf()：Cloudflare 在回源 HTML 里插的 RUM 探针（/cdn-cgi/rum）用相对路径，
-    # 会被 <base href="<前缀>/"> 改锚成 <前缀>/cdn-cgi/rum → 落到本服务 → 404。
-    # cdn-cgi 请求本就该由 Cloudflare 边缘处理，一律还原成根路径；sendBeacon 也要
-    # 包一层，RUM 上报走的就是它，不在 fetch/XHR 的覆盖范围内。
-    printf '    (function(){var b="%s";function cf(u){var i=u.indexOf("cdn-cgi/");return i>-1?"/"+u.slice(i):u;}\n' "$BASE"
-    printf '    function fix(u){if(typeof u!=="string")return u;var v=cf(u);if(v!==u)return v;if(u.charAt(0)!=="/"||u.charAt(1)==="/")return u;if(u===b||u.indexOf(b+"/")===0)return u;return b+u;}\n'
-    printf '    var of=window.fetch;if(of){window.fetch=function(u){var a=[].slice.call(arguments);a[0]=fix(u);return of.apply(this,a);};}\n'
-    printf '    var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){var a=[].slice.call(arguments);a[1]=fix(u);return xo.apply(this,a);};\n'
-    printf '    var OE=window.EventSource;if(OE){var NE=function(u,c){return new OE(fix(u),c);};NE.prototype=OE.prototype;window.EventSource=NE;}\n'
+    printf '    <script>/* [MIXLY_DOCKER_ADMIN_URLFIX] 接口 URL 兜底 + HTML 响应诊断（BASE） */\n'
+    printf '    (function(){var b="%s";\n' "$BASE"
+    # cf()：Cloudflare 边缘插入的 RUM 探针（/cdn-cgi/rum）用相对路径，会被
+    # <base href="<前缀>/"> 改锚成 <前缀>/cdn-cgi/rum → 落到本服务 → 404，
+    # 一律还原成根路径交回边缘处理；sendBeacon 也要包一层（RUM 走它上报）。
+    printf '    function cf(u){var i=u.indexOf("cdn-cgi/");return i>-1?"/"+u.slice(i):u;}\n'
+    printf '    function fixPath(p){if(typeof p!=="string"||p.charAt(0)!=="/"||p.charAt(1)==="/")return p;if(!b)return p;if(p===b||p.indexOf(b+"/")===0)return p;return b+p;}\n'
+    # 官方把接口拼成 location.origin + "/api/…" 时字符串不再以 / 开头，
+    # 旧版兜底会整条放行；这里只改写 host 与当前页相同的绝对地址。
+    printf '    function sameOrigin(u){var s="";if(u.indexOf("https://")===0)s="https://";else if(u.indexOf("http://")===0)s="http://";else return "";var r=u.slice(s.length),i=r.indexOf("/"),h=i<0?r:r.slice(0,i);if(h!==location.host)return "";return {pre:s,host:h,path:i<0?"/":r.slice(i)};}\n'
+    printf '    function fix(u){\n'
+    printf '    if(u&&typeof Request!=="undefined"&&u instanceof Request){var nu=fix(u.url);if(nu===u.url)return u;try{return new Request(nu,u);}catch(e){return u;}}\n'
+    printf '    if(typeof u!=="string")return u;var v=cf(u);if(v!==u)return v;if(u.charAt(0)==="/")return fixPath(u);\n'
+    printf '    var o=sameOrigin(u);if(o){var p=o.path,c=p.length,q=p.indexOf("?"),h=p.indexOf("#");if(q>-1&&q<c)c=q;if(h>-1&&h<c)c=h;var head=p.slice(0,c),tail=p.slice(c),np=fixPath(head||"/");if(np!==head)return o.pre+o.host+np+tail;}return u;}\n'
+    printf '    function isApi(u){return typeof u==="string"&&(u.indexOf("/api/")>-1||u.indexOf("api/")===0);}\n'
+    printf '    function diag(url,r){var ct="";try{ct=(r.headers&&r.headers.get&&r.headers.get("content-type"))||"";}catch(e){}if(ct.toLowerCase().indexOf("text/html")<0)return r;var m="[mixly-docker] 接口返回 HTML 而不是 JSON：url="+url+" status="+r.status+" content-type="+ct;try{return r.clone().text().then(function(t){var f=m+" 响应开头="+String(t).slice(0,120);console.error(f);if(isApi(url))throw new Error(f+"。常见原因：请求落到站点根/反代 404 页、管理端会话过期被重定向到登录页，或在线更新覆盖补丁后尚未自愈。");return r;});}catch(e){console.error(m);return r;}}\n'
+    printf '    var of=window.fetch;if(of){window.fetch=function(u){var a=[].slice.call(arguments),n=fix(u);a[0]=n;var url=(n&&n.url)||(typeof n==="string"?n:String(u));return of.apply(this,a).then(function(r){return diag(url,r);});};}\n'
+    printf '    var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){var a=[].slice.call(arguments);a[1]=fix(u);var url=(a[1]&&a[1].url)||(typeof a[1]==="string"?a[1]:String(u)),self=this;try{this.addEventListener("load",function(){var ct="";try{ct=(self.getResponseHeader&&self.getResponseHeader("content-type"))||"";}catch(e){}if(ct.toLowerCase().indexOf("text/html")>-1&&isApi(url)){var t="";try{t=String(self.responseText||"").slice(0,120);}catch(e){}console.error("[mixly-docker] 接口返回 HTML 而不是 JSON：url="+url+" status="+self.status+" content-type="+ct+" 响应开头="+t);}});}catch(e){}return xo.apply(this,a);};\n'
+    printf '    var OE=window.EventSource;if(OE){var NE=function(u,c){var n=fix(u),es=new OE(n,c);try{es.addEventListener("error",function(){console.error("[mixly-docker] SSE 连接异常：url="+String(n)+" readyState="+es.readyState);});}catch(e){}return es;};NE.prototype=OE.prototype;NE.CONNECTING=OE.CONNECTING;NE.OPEN=OE.OPEN;NE.CLOSED=OE.CLOSED;window.EventSource=NE;}\n'
     printf '    try{if(navigator.sendBeacon){var sb=navigator.sendBeacon.bind(navigator);navigator.sendBeacon=function(u,d){try{return sb(fix(u),d);}catch(e){return false;}};}}catch(e){}\n'
     printf '    })();\n'
     printf '    </script>\n'

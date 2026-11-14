@@ -892,6 +892,12 @@ if [ -z "$t19_fail" ]; then
         || t19_fail="运行时兜底未包 sendBeacon（CF RUM 上报会 404）"
     grep -q "cdn-cgi/" "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
         || t19_fail="运行时兜底缺 cdn-cgi 还原逻辑"
+    # 更新接口拿到 HTML 时不能只抛 "Unexpected token '<'"：必须能定位到 URL
+    grep -q "接口返回 HTML" "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
+        || t19_fail="运行时兜底缺 HTML 响应诊断"
+    # 官方把接口拼成 location.origin + "/api/…" 时也要补前缀，不能整条放行
+    grep -q "sameOrigin" "$tmp/mixio-app/ejs/manage.ejs" 2>/dev/null \
+        || t19_fail="运行时兜底未覆盖同源绝对地址"
 fi
 docker rm -f "$cid" >/dev/null 2>&1 || true
 

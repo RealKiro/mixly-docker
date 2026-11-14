@@ -50,16 +50,17 @@ MixSuite-linux-x64/
 |---|---|
 | `Dockerfile` | `debian:trixie-slim`（loong64 用 `ghcr.io/loong64/debian:trixie-slim`）+ NW.js/X11 依赖 + Xvfb + gosu + tini 的运行环境镜像（压缩约 60 MiB / 解压约 165 MiB，amd64+arm64+loong64 三架构） |
 | `docker-entrypoint.sh` | 启动前定位 MixSuite 包、校验 `.host/nw` ELF 架构、预建并 chown `mixio-app` 数据目录、起 Xvfb 虚拟显示、gosu 降权后 `exec MixlyServer`（前台运行） |
-| `docker-compose.yml` | 群晖 Container Manager 可直接导入，含端口（8443/18084/1883/8083/8084/8082/8086）、挂载、串口透传示例 |
-| `build-push.sh` | 本地 buildx 构建并同时推送 GHCR + Docker Hub |
-| `.github/workflows/ci.yml` | CI 流水线：PR/推 main 跑测试与跨架构构建检查；v* 标签或手动触发时测试通过后推送 GHCR + Docker Hub |
+| `docker-compose.yml` | 群晖 Container Manager 可直接导入，含端口（8443/18084/1883/8083/8084/8082/8086）、挂载、串口透传示例；`image` 为 `${MIXLY_IMAGE:-ghcr.io/realkiro/mixly-server:latest}`，默认公开镜像、可用变量覆盖 |
+| `.env.example` | 覆盖镜像地址用：Fork 自建后复制成 `.env`，写 `MIXLY_IMAGE=ghcr.io/<你的用户名>/mixly-server:latest`（`.env` 已加入 .gitignore） |
+| `build-push.sh` | 本地 buildx 构建并同时推送 GHCR + Docker Hub；GHCR 命名空间从 `git remote origin` 推断，Fork 后自动推到自己账号，也可显式设 `GHCR_USER` |
+| `.github/workflows/ci.yml` | CI 流水线：PR/推 main 跑测试与跨架构构建检查；v* 标签或手动触发时测试通过后推送 GHCR + Docker Hub。用 `github.repository_owner` 定名 + `packages: write` 权限，Fork 后镜像落在 Fork 者命名空间；Job Summary 会输出该填的 `MIXLY_IMAGE` |
 | `test/smoke-test.sh` | 冒烟测试：无需官方运行包，用假 MixSuite 包（ELF 桩 + 脚本桩）验证缺包指引/架构校验/Xvfb 启动/数据目录属主/前台保活/优雅退服/镜像元数据 |
 
 ## 首次运行（三步）
 
 1. **建目录**：在群晖 File Station 建 `/docker/mixly/mixly_server`。
-2. **放运行包**：从官方百度网盘下载对应架构的 `MixSuite-linux-<架构>.zip`（网盘地址与提取码请填这里：`＿＿＿＿＿＿`），解压后把**里面的全部内容**（`MixlyServer`、`.host/`、`mixio-app/`、`mixly/` 等）放进该目录。放好后应存在 `/docker/mixly/mixly_server/mixio-app/mixio.js`。
-3. **启动容器**：Container Manager → 项目 → 新增 → 导入 `docker-compose.yml` → 启动。
+2. **放运行包**：从官方百度网盘下载对应架构的 `MixSuite-linux-<架构>.zip`（网盘地址与提取码请填这里：`＿＿＿＿＿＿`）；最新版包内已含 `mixio-app/`、`mixly/`、`mixco/`、`mixmo/`，解压后把**里面的全部内容**放进该目录。**只有 `mixai` 需单独下载解压**，也放进该目录、与 `mixio-app/` **并列**（即 `/docker/mixly/mixly_server/mixai/`，不要变成 `mixai/mixai/`）。放好后应存在 `/docker/mixly/mixly_server/mixio-app/mixio.js`。
+3. **启动容器**：Container Manager → 项目 → 新增 → 导入 `docker-compose.yml` → 启动。默认使用公开镜像 `ghcr.io/realkiro/mixly-server:latest`；若换成自己 Fork 构建的镜像，在 compose 同目录放 `.env` 写 `MIXLY_IMAGE=ghcr.io/<你的用户名>/mixly-server:latest`（或在项目的环境变量里设置），无需改 compose 文件。
 
 启动成功后浏览器访问：
 
@@ -121,6 +122,7 @@ bash test/smoke-test.sh ghcr.io/realkiro/mixly-server:v2.0
 - **想看看容器里那个 GUI 窗口**：它在 Xvfb 虚拟显示里，浏览器访问无需它；确有需要可 `docker exec -it <容器> bash` 后自行安装 `x11vnc`/`xterm` 等工具。
 - **容器反复重启、只活几秒、日志有 `XGetWindowAttributes failed for window 0`**：这是 NW.js 窗口层故障（窗口从未创建成功）。v2.1.0 已定位根因——官方启动器传给 `.host/nw` 的 `--ozone-platform=x11` 在 Xvfb 下建不了窗口；**v2.2.0 起默认启动方式已避开该参数（直连 `.host/nw`，不指定 ozone）**，升级后即恢复正常。详见下节[排障存档](#排障存档短命-0-退出与启动策略轮换)。
 - **MixMO（手机 App 设计）怎么进**：官方 MixSuite 2026-10-15 起的压缩包已内置 `mixmo/`（与 `mixly/`、`mixco/` 同级，解压即用；MixlyAI 包较大，需单独下载解压后放入套件根目录）。该版本官方桌面壳菜单和管理端已接入 MixMO，但服务端 `mixio.js` 还没挂 `/mixmo` 路由——**本镜像 v2.3.0 起入口脚本会自动给卷内 `mixio.js` 打幂等补丁**（首次前备份 `mixio.js.mixly-docker-orig`；官方在线更新覆盖后自动重打），补上 `/mixmo` 静态挂载和首页入口，直接访问 `https://<IP>:8443/mixmo` 即可。详见 [README.md](README.md#升级-mixsuite-运行包保留数据)。
+- **后台点“检查更新 / 一键更新”报 `正在发送更新请求... Unexpected token '<', "<!DOCTYPE "... is not valid JSON`**：不是 JSON 语法错，是更新接口收到了 HTML 页面（Express 默认 404 页 / 会话过期后的登录页 / 反代错误页）。入口脚本注入的兜底会把 **URL、状态码、响应开头** 打到浏览器控制台，并把 `/api/` 请求换成中文错误提示；按 [README 排障表](README.md#管理后台走-admin) 对照处理。刚在线更新完出现时，先 `docker compose restart mixly`（更新只重启 node 进程，前缀补丁要重跑入口脚本才补全）。
 
 ## 排障存档：短命-0 退出与启动策略轮换
 

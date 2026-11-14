@@ -7,14 +7,29 @@
 # 前置：docker login ghcr.io 与 docker login 已完成
 set -euo pipefail
 
-GHCR_USER="${GHCR_USER:-RealKiro}"
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# GHCR 命名空间跟随当前仓库的 owner：Fork 之后自动推到你自己的账号，
+# 不再写死原作者用户名。也可用 GHCR_USER=<用户名> 显式覆盖。
+if [ -z "${GHCR_USER:-}" ]; then
+  ORIGIN_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+  case "$ORIGIN_URL" in
+    https://github.com/*) GHCR_USER="${ORIGIN_URL#https://github.com/}"; GHCR_USER="${GHCR_USER%%/*}" ;;
+    git@github.com:*)     GHCR_USER="${ORIGIN_URL#git@github.com:}";     GHCR_USER="${GHCR_USER%%/*}" ;;
+    *)                    GHCR_USER="" ;;
+  esac
+fi
+if [ -z "${GHCR_USER:-}" ]; then
+  echo "无法从 git remote origin 推断 GitHub 用户名，请显式指定：" >&2
+  echo "  GHCR_USER=<你的用户名> ./build-push.sh ${1:-latest}" >&2
+  exit 1
+fi
+
 DOCKERHUB_USER="${DOCKERHUB_USER:-YOUR_DOCKERHUB_USERNAME}"   # 设为真实用户名则同时推 Docker Hub
 # Docker 仓库名必须全小写，统一归一化，避免 "repository name must be lowercase"
 GHCR_USER="$(printf '%s' "$GHCR_USER" | tr '[:upper:]' '[:lower:]')"
 DOCKERHUB_USER="$(printf '%s' "$DOCKERHUB_USER" | tr '[:upper:]' '[:lower:]')"
 TAG="${1:-latest}"
-
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 GHCR_IMAGE="ghcr.io/${GHCR_USER}/mixly-server"
 DH_IMAGE="${DOCKERHUB_USER}/mixly-server"
 PUSH_DH=0

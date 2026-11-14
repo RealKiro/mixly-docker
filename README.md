@@ -6,6 +6,8 @@
 
 **镜像只含运行环境（压缩约 60 MiB / 解压约 165 MiB，Debian + NW.js/X11 依赖 + Xvfb 虚拟显示），不含官方运行包。** 需自行从官方百度网盘下载对应架构的 `MixSuite-linux-<架构>.zip`，解压后放进映射目录。
 
+**运行环境镜像有两种拿法，compose 通过 `MIXLY_IMAGE` 变量切换、默认值不写死**：默认使用维护者已构建好的公开多架构镜像 `ghcr.io/realkiro/mixly-server:latest`（免登录即可拉取）；或 Star + Fork 到自己的 GitHub Actions 构建一份由自己掌控的版本，构建后在 `.env` 里写一行 `MIXLY_IMAGE=ghcr.io/<你的用户名>/mixly-server:latest` 即可切换，无需改动 compose 文件。
+
 > Mixly 4.0 起官方只有一个发行版：内置 MixIO 的 **MixSuite**（NW.js 应用），替代旧版 `mixly_server`（`mixio` 单文件）。**强制 HTTPS**：HTTP(8080) 被官方固定关闭，请用 `https://NAS_IP:8443`。从 v1.x 升级见[迁移说明](#从-v1xmixly_server-迁移)。
 >
 > 实现原理、构建与深度排障见 [README-docker.md](README-docker.md)。
@@ -14,9 +16,11 @@
 
 ## 快速开始
 
-### 1. 构建自己的镜像（推荐）
+### 1. 获取运行环境镜像
 
-本项目不提供公共镜像。Fork 后用自己的 GitHub Actions 构建，拉取快、版本可控、不依赖他人仓库：
+**最省事**：直接用 `ghcr.io/realkiro/mixly-server:latest`。这是维护者通过本项目 CI 构建的公开多架构镜像（amd64 + arm64 + loong64），也是 `docker-compose.yml` 里的默认值，免登录可直接拉取。想先跑通或只是试用，**跳过下面 4 个编号步骤**，直接看「2. 放置官方运行包」。
+
+**长期用、想自己掌控版本（推荐）**：Star + Fork 到自己的 GitHub Actions 构建，拉取快、版本可控、不依赖他人仓库：
 
 1. **Star + Fork** 本仓库。
 2. 进入你 Fork 的仓库 → **Actions** → 按提示点 **I understand my workflows, go ahead and enable them** → 左侧选 **docker-ci** → **Run workflow**。
@@ -30,23 +34,37 @@
    使用 Actions 自带 `GITHUB_TOKEN`，**无需配置任何 Secrets**。（可选推 Docker Hub：配 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`，未配自动跳过。）
 4. 头像 → **Packages** → `mixly-server` → **Package settings** → **Change visibility** → **Public**。
    （保持 Private 也行，但 NAS 端要先 `docker login ghcr.io`。）
+5. 构建完成后，Actions 的 **Job Summary** 会直接给出你的镜像地址和该填的 `MIXLY_IMAGE`。把 `.env.example` 复制成 `.env`（与 compose 同目录），按 Summary 填一行即可，**不用改 compose 文件**。
+
+> CI 用 `github.repository_owner` 生成镜像名并声明了 `packages: write` 权限，Fork 后镜像会自动落在**你自己**的命名空间，不会推到原作者账号。`build-push.sh` 同理：默认从 `git remote origin` 推断用户名，不再写死 `RealKiro`。
 
 ### 2. 放置官方运行包
 
-按机器架构下载（x64 / arm64 / loong64，不清楚可咨询主机厂家），把**压缩包里的全部内容**放进映射目录（示例 `/docker/mixly/mixly_server`）。放好后应存在：
+**最新版 MixSuite 已把 mixio、mixly、mixco、mixmo 打在一个包里**。按机器架构选 x64 / arm64 / loong64（不清楚可咨询主机厂家）：解压 `MixSuite-linux-<架构>.zip`，把**里面的全部内容**放进映射目录 `/docker/mixly/mixly_server`，其中就有并列的 `mixio-app/`、`mixly/`、`mixco/`、`mixmo/`。
+
+**只有 `mixai` 需要单独下载**：MixAI 交互体验包不在 MixSuite 内，单独下载后解压，把内容放进**同一层**，与 `mixio-app/` **并列**（`/docker/mixly/mixly_server/mixai/`）。不装不影响其他功能，只是 `/mixai` 打不开。
+
+放好后这些条目应都在**同一层**：
 
 ```
-/docker/mixly/mixly_server/MixlyServer           # 启动器
-/docker/mixly/mixly_server/.host/nw             # NW.js 运行时
-/docker/mixly/mixly_server/mixio-app/mixio.js   # MixIO 服务端
-/docker/mixly/mixly_server/mixly/               # Mixly 编辑器
+/docker/mixly/mixly_server/MixlyServer              # 启动器
+/docker/mixly/mixly_server/MixlyServer.desktop
+/docker/mixly/mixly_server/firstrun.sh
+/docker/mixly/mixly_server/.host/nw                 # NW.js 运行时
+/docker/mixly/mixly_server/mixio-app/mixio.js      # MixIO 服务端
+/docker/mixly/mixly_server/mixly/                  # Mixly 图文编程（包内置，与 mixio-app 并列）
+/docker/mixly/mixly_server/mixco/                  # MixCO 自学课程（包内置）
+/docker/mixly/mixly_server/mixmo/                  # MixMO 手机 App 设计（包内置）
+/docker/mixly/mixly_server/mixai/                  # MixAI 交互体验（单独下载解压放入）
 ```
 
-⚠️ 多套一层 `MixSuite-linux-x64/` 是最常见的错误——要放**文件夹里面的内容**。入口脚本对多套一层有自动兼容，但仍建议放对。
+⚠️ 两个最常见的错误：主体多套一层 `mixly_server/`，或把 MixAI 包整个文件夹拖进去变成 `mixai/mixai/` —— 都要放**文件夹里面的内容**。入口脚本对主体多套一层有自动兼容并打 WARN，**mixai 放错层级不会兼容**，表现为 `/mixai` 404。
+
+> 旧版或分包发行的包可能不含 `mixly/` / `mixco/` / `mixmo/`，缺哪个就单独解压补进去，层级同样是并列。
 
 ### 3. 启动
 
-下载 [docker-compose.yml](docker-compose.yml) 到 `/docker/mixly/`，把 `image:` 改成你自己的镜像后启动：
+下载 [docker-compose.yml](docker-compose.yml) 到 `/docker/mixly/`。`image:` 写的是 `${MIXLY_IMAGE:-ghcr.io/realkiro/mixly-server:latest}`：**默认就是公开镜像，什么都不用改**；要用自己 Fork 构建的镜像，就在同目录建 `.env`（复制 `.env.example`）写 `MIXLY_IMAGE=ghcr.io/<你的GitHub用户名>/mixly-server:latest`，或用 `MIXLY_IMAGE=... docker compose up -d` 临时指定。群晖 Container Manager 若不读 `.env`，可在项目的环境变量里加 `MIXLY_IMAGE`。然后启动：
 
 ```bash
 docker compose up -d
@@ -94,13 +112,13 @@ docker compose up -d
 > eventSource = new EventSource(q);        // ← 对 EventSource(...) 做替换永远命中不了
 > ```
 >
-> 所以除了改写 `'/api/download` 这类字符串常量，页面里还会注入一段脚本统一改写 `fetch` / `XMLHttpRequest` / `EventSource` / `sendBeacon` 的根路径 URL，不依赖写法，官方以后新增接口也自动覆盖。已相对化的 URL 原样放行，`https://…`、`//cdn…` 不动。
+> 所以除了改写 `'/api/download` 这类字符串常量，页面里还会注入一段脚本统一改写 `fetch` / `XMLHttpRequest` / `EventSource` / `sendBeacon` 的根路径 URL，不依赖写法，官方以后新增接口也自动覆盖。已相对化的 URL 原样放行，`https://…`、`//cdn…` 不动；官方把接口拼成 `location.origin + "/api/…"` 或用 `new Request(...)` 时同样会补前缀（只改写与当前页同源的绝对地址）。此外脚本会在接口返回 `text/html` 时输出 URL / 状态码 / 响应开头，避免只看到 `Unexpected token '<'` 却不知道请求打去了哪里。
 
 > **Cloudflare 的 RUM 探针也会被 `<base>` 带偏**：边缘会在回源 HTML 里插一段 `/cdn-cgi/rum` 上报脚本，它用的是**相对路径** `cdn-cgi/rum`——页面在 `/admin/` 下就会被解析成 `/admin/cdn-cgi/rum` 打到本服务，控制台报一条 `POST /admin/cdn-cgi/rum 404`。这条纯统计、不影响任何功能，但兜底脚本会把这些 `cdn-cgi/*` 请求还原成根路径（`/cdn-cgi/rum`），交回 Cloudflare 边缘处理，控制台即干净。
 >
 > 注入点也不写死：`<base>` 优先落在 `<meta charset=…>` 后（大小写、`http-equiv` 写法都认），找不到就退到 `</head>` 前 / `<head>` 后；兜底脚本同理，最后连 `<head>` 都没有时追加到文件末尾，并回读校验标记是否真的落盘。锚点全部落空会打 WARN 而不是静默跳过——静默跳过等于页面能开、只有在线更新 404，是最难排查的一类故障（官方调整模板头部写法后踩过，本版起加固）。
 
-> **在线更新**（面板里的“检查更新 / 一键更新”）调的是 `POST /api/check-update` 和 `GET /api/download`（EventSource 推 SSE 进度），两个都是根路径，不处理就会 404。另外更新包会把 `mixio.js`、`ejs/`、`js/` 整包替换、补丁标记丢失，而更新只重启 node 进程、不重启容器——入口脚本因此挂了个 5 秒轮询的观察者，检测到标记丢失就自动重打（日志：`检测到运行包被在线更新覆盖`）。模板是 `ejs.renderFile` 每次读盘，改完立即生效；`mixio.js` 要进程重启才生效，更新流程本身会重启进程，通常正好接上。万一更新后 `/admin` 仍 404，`docker compose restart mixly` 一次即可。
+> **在线更新**（面板里的“检查更新 / 一键更新”）调的是 `POST /api/check-update` 和 `GET /api/download`（EventSource 推 SSE 进度），两个都是根路径，不处理就会 404；Express 的 404 是 HTML 页，前端 `.json()` 就会报 `Unexpected token '<'`（判别见上文排障表）。另外更新包会把 `mixio.js`、`ejs/`、`js/` 整包替换、补丁标记丢失，而更新只重启 node 进程、不重启容器——入口脚本因此挂了个每秒检查标记的观察者，前缀补丁或运行时兜底任一缺失就立即重打（日志：`检测到运行包被在线更新覆盖`）。模板是 `ejs.renderFile` 每次读盘，改完立即生效；`mixio.js` 要进程重启才生效，更新流程本身会重启进程，通常正好接上。万一更新后 `/admin` 仍 404 或取到 HTML，`docker compose restart mixly` 一次即可。
 
 **启用方式（三选一）**
 
@@ -155,6 +173,31 @@ location / {
 | 2 | `mixly.example.com` | `https://10.10.64.4:8443` | 默认 |
 
 **故障判别**：`/admin` 返回 `Cannot GET /admin`（Express 兜底 404）= 请求进了**主站**，主站没有该路由。查 `/admin` 的 `proxy_pass` 是否误指主站端口、或 CF 路由里主机名规则排在前面。细分：`/admin`、`/admin/`、`/adminLogin` **三者全 404** → 顺序错；只有 `/admin` 404 而 `/admin/` 正常 → 写成了精确匹配。
+
+**在线更新报 `正在发送更新请求... Unexpected token '<', "<!DOCTYPE "... is not valid JSON`**：不是 JSON 写坏了——前端 `res.json()` 收到的是**一个 HTML 页面**。会返回 `<!DOCTYPE html>` 的只有页面，按出现概率排查：
+
+| 响应来自 | DevTools → Network 里那条请求的特征 | 处理 |
+|---|---|---|
+| Express 默认 404 页 | `404`、`text/html`、正文 `Cannot GET /api/check-update`，且请求 URL 是 `/api/...`（**没带 `/admin`**） | 前缀补丁没生效：确认 `MIXIO_ADMIN_BASE=/admin`、卷可写、启动日志有「已注入运行时 URL 兜底」；刚在线更新过就 `docker compose restart mixly`（更新只重启 node 进程，不重跑入口脚本） |
+| 管理端登录页 | `200`、`text/html`、正文是登录表单（前面通常有一次 302） | 会话过期，重新登录后台再点更新 |
+| 反代 / Cloudflare 错误页 | `502 / 520 / 524`、页面带 Nginx 或 Cloudflare 字样 | 反代规则：`/admin*` **原样**转发到 18084（不剥前缀），且路径规则排在纯主机名规则之前 |
+
+入口脚本注入的兜底脚本会在接口返回 `text/html` 时把 **URL / 状态码 / 响应开头** 打到控制台，并把 `/api/` 请求换成可读的中文错误，页面不再只显示一句 `Unexpected token '<'`。也可以直接在容器外取证（把域名换成自己的）：
+
+```bash
+# Linux / Git Bash
+curl -k -sS -X POST -H "Content-Type: application/json" -d '{}' \
+  -D - -o /tmp/upd.body "https://域名/admin/api/check-update" | head -20
+head -c 200 /tmp/upd.body
+```
+
+```powershell
+# Windows PowerShell：head 是 Linux 命令；curl 要写全 curl.exe 避开 Invoke-WebRequest 别名
+curl.exe -k -sS --max-time 20 -X POST -H "Content-Type: application/json" -d "{}" `
+  -w "`nHTTP=%{http_code} TYPE=%{content_type}`n" "https://域名/admin/api/check-update"
+```
+
+判据：`200 + application/json`（如 `{"needsUpdate":false,...}`）= 管理端路由正常，问题在**前端发出的 URL 没带前缀**；`404 + text/html` 且正文 `Cannot POST /api/check-update`（响应带 `access-control-allow-origin: *`）= 请求落到了**主站 8443**，这正是 `<!DOCTYPE html>` 的来源。`curl.exe -X OPTIONS ...` 还能看到该路由的 `allow: POST`，用来排除「接口被官方改名」这类猜测。
 
 **备选：独立子域名**（旧面板无路径规则、或 DSM 反向代理只能按域名分时）
 
@@ -212,33 +255,38 @@ docker start mixly-server
 
 ## 升级 MixSuite 运行包（保留数据）
 
-官方更新较快（例如 2026-10-15 版才内置 `mixmo/`），换包时**只覆盖程序文件、保留数据目录**：
+官方更新较快（例如 2026-10-15 版才内置 `mixmo/`）。**运行包与数据都在宿主机的映射目录里，容器只是路径映射读取，因此只要只替换程序文件、不覆盖数据目录，升级不需要备份**；`docker rm` / 重建容器都不会动这些数据。
 
 ```bash
-# 1) 停容器
-docker rm -f mixly-server
+# 1) 停容器（数据留在宿主机）
+docker compose down
 
-# 2) 备份数据（SQLite 用户/项目、证书、配置都在这里）
-cp -a <映射路径>/mixio-app/storage <映射路径>/mixio-app/storage.bak
-cp -a <映射路径>/mixio-app/config  <映射路径>/mixio-app/config.bak
-
-# 3) 解压新包并覆盖程序文件 —— 不要动 storage / config / logs / runtime
+# 2) 解压新包到临时目录，只同步程序文件，排除数据目录
 unzip -o ~/Downloads/MixSuite-linux-x64.zip -d /tmp/mixnew
-cp -a /tmp/mixnew/MixSuite-linux-x64/. <映射路径>/
-# 若上一步覆盖了数据目录，把备份放回：
-# rm -rf <映射路径>/mixio-app/storage && mv <映射路径>/mixio-app/storage.bak <映射路径>/mixio-app/storage
+rsync -a \
+  --exclude='mixio-app/storage/' --exclude='mixio-app/config/' \
+  --exclude='mixio-app/logs/'   --exclude='mixio-app/runtime/' \
+  --exclude='user-data/' \
+  /tmp/mixnew/MixSuite-linux-x64/  <映射路径>/
 
-# 4) 按原方式重新启动
+# 3) 按原方式启动（入口脚本会自动给 mixio.js / ejs / js 重打幂等补丁）
+docker compose up -d
 ```
 
-可选组件（放套件根目录即可，与 `mixio-app/` 同级）：
+保留 `mixio-app/` 下的 `storage/`（SQLite 用户/项目）、`config/`（配置 + 证书）、`logs/`、`runtime/` 与根目录 `user-data/`，其余程序文件可放心覆盖；新版包自带的可选组件（`mixmo/` 等）也会一并同步进来。
+
+⚠️ 只有用 `cp -a /tmp/mixnew/.../. <映射路径>/` **整包覆盖**时才危险：新包里同样带着空的 `storage/`、`config/` 目录，会冲掉现有数据，那种做法才需要先备份。若把运行文件单独放一个目录、数据目录另做映射（单独挂载 `mixio-app/storage`、`config`、`user-data` 等），升级时整个程序目录直接替换即可，同样不需要备份。
+
+> 定期冷备份 `mixly_server/` 仍建议保留，但那是防硬盘故障，不是升级所需。
+
+可选组件（都放在套件根目录，与 `mixio-app/` **并列**）：最新版 MixSuite 已内置 `mixly` / `mixco` / `mixmo`，**只有 `mixai` 需要单独下载解压**放入，注意别多套一层同名文件夹。
 
 | 产品 | 目录 | 入口 | 来源 |
 |---|---|---|---|
 | Mixly 图文编程 | `mixly/` | `/mixly` | MixSuite 内置 |
 | MixCO 自学课程 | `mixco/` | `/mixco` | MixSuite 内置 |
 | **MixMO 手机 App 设计** | `mixmo/` | `/mixmo` | MixSuite 内置（2026-10-15 起） |
-| MixAI 交互体验 | `mixai/` | `/mixai` | **单独下载**后放进来 |
+| MixAI 交互体验 | `mixai/` | `/mixai` | **单独下载解压**放入，与 `mixio-app/` 并列 |
 | MixNT 网络仿真 | `mixnt/` | `/mixnt` | 随包内嵌或单独放置 |
 
 > 官方 2026-10-15 版的桌面壳与管理端已接入 MixMO，但服务端 `mixio.js` 尚未挂载 `/mixmo` 路由。本镜像 v2.3.0 起会在启动时对卷内 `mixio.js` 打**幂等补丁**（备份 `mixio.js.mixly-docker-orig`，插入块带 `MIXLY_DOCKER_MIXMO_PATCH` 标记），补上静态挂载与首页入口；卷里没有 `mixmo/` 时 `/mixmo` 自然 404、无副作用，放入后**无需重启**即生效。
@@ -419,7 +467,7 @@ docker compose pull && docker compose up -d    # 或 docker pull 后删旧容器
 
 ## 从 v1.x（mixly_server）迁移
 
-1. **备份**：复制原映射目录下的 `mixio/storage` 文件夹（SQLite 数据）。
+1. **备份**：复制原映射目录下的 `mixio/storage` 文件夹（SQLite 数据）。这是跨大版本的数据目录迁移，与上面的常规升级不同 —— 旧位置会被替换，所以这一步的备份不能省。
 2. **换包**：下载对应架构的 `MixSuite-linux-<架构>.zip`，解压后把内容放进映射目录（替换旧的 `mixio/` `mixly/` `mixco/` 布局）。
 3. **带数据升级**：旧数据在 `mixio/storage`，新位置是 `mixio-app/storage`——把旧目录内容复制到新的 `mixio-app/storage/` 再启动。
 4. **端口变化**：管理/访问入口从 `http://8080` 改为 `https://8443`（HTTP 官方已关闭），反代或端口映射记得改。

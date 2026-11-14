@@ -9,6 +9,15 @@
 #   * 数据在映射目录的 mixio-app/ 下：storage(SQLite) / logs / config
 #   * 管理员默认 admin/public，在 mixio-app/config/config.json 中修改
 #
+# 镜像来源：默认值 + 可覆盖变量 MIXLY_IMAGE（不写死，Fork 用户零改动切换）
+#   * 不设置 → ghcr.io/realkiro/mixly-server:latest
+#     （维护者构建的公开多架构镜像，免登录直接拉，Docker 按设备架构自动选择）
+#   * Fork 后用 Actions 自建 → 在本文件同目录建 .env（可复制 .env.example）：
+#       MIXLY_IMAGE=ghcr.io/<你的github用户名>/mixly-server:latest
+#     也可临时指定：MIXLY_IMAGE=ghcr.io/<你的github用户名>/mixly-server:latest docker compose up -d
+#   * 群晖 Container Manager 若不读取 .env，可在项目的环境变量里加 MIXLY_IMAGE，
+#     或直接把下方默认值换成自己的地址。
+#
 # 首次运行三步：
 #   1. 建目录 /docker/mixly/mixly_server
 #   2. 按机器架构从官方百度网盘下载 MixSuite-linux-<x64|arm64|loong64>.zip，
@@ -17,7 +26,7 @@
 #   3. Container Manager 导入本文件并启动；之后浏览器访问 https://NAS_IP:8443
 services:
   mixly:
-    image: ghcr.io/realkiro/mixly-server:latest   # 多架构镜像，按 NAS 架构自动选择
+    image: ${MIXLY_IMAGE:-ghcr.io/realkiro/mixly-server:latest}
     container_name: mixly-server
     restart: unless-stopped
     # NW.js 是完整 Chromium，共享内存不足会导致渲染进程异常退出
